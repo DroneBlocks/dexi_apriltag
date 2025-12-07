@@ -13,7 +13,7 @@ AprilTagFollower::AprilTagFollower(const rclcpp::NodeOptions &options)
     this->declare_parameter("proportional_gain_xy", 2.0);  // Aggressive response
     this->declare_parameter("proportional_gain_z", 0.3);
     this->declare_parameter("max_velocity_xy", 3.0);  // Max speed 3.0 m/s
-    this->declare_parameter("max_velocity_z", 0.3);
+    this->declare_parameter("max_velocity_z", 1.0);
     this->declare_parameter("deadband_pixels", 20.0);
     this->declare_parameter("target_tag_id", 0);
     this->declare_parameter("detection_timeout", 10.0);

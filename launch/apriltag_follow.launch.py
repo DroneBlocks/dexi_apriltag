@@ -23,7 +23,7 @@ def generate_launch_description():
 
     ld.add_action(DeclareLaunchArgument(
         'proportional_gain_xy',
-        default_value='0.5',
+        default_value='2.0',
         description='Proportional gain for XY movement'))
 
     ld.add_action(DeclareLaunchArgument(
@@ -33,12 +33,12 @@ def generate_launch_description():
 
     ld.add_action(DeclareLaunchArgument(
         'max_velocity_xy',
-        default_value='0.5',
+        default_value='3.0',
         description='Maximum XY velocity in m/s'))
 
     ld.add_action(DeclareLaunchArgument(
         'max_velocity_z',
-        default_value='0.3',
+        default_value='1.0',
         description='Maximum Z velocity in m/s'))
 
     ld.add_action(DeclareLaunchArgument(
