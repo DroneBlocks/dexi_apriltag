@@ -1,0 +1,26 @@
+apriltag_odometry:
+  ros__parameters:
+    # Frame configuration
+    base_link_frame: "base_link"
+    tag_family: "tag36h11"
+
+    # Tag selection
+    target_tag_id: -1  # -1 = use best quality tag, >=0 = specific tag ID
+    min_detection_quality: 0.5  # Minimum quality threshold (0.0-1.0)
+
+    # Variance parameters for PX4 EKF2 fusion
+    # Lower variance = EKF trusts this source more
+    # Higher variance = EKF trusts this source less
+
+    # Position variance in m² for x,y,z
+    # Typical AprilTag accuracy: 1-5cm depending on distance
+    # NOTE: Z variance is high since we use distance sensor for altitude (not vision)
+    position_variance: [0.01, 0.01, 100.0]  # Low XY variance, high Z variance
+
+    # Orientation variance in rad² for roll,pitch,yaw
+    # Typical AprilTag orientation accuracy: 1-5 degrees
+    orientation_variance: [0.01, 0.01, 0.01]  # ~5.7 degrees std dev
+
+    # Velocity variance in m²/s² for vx,vy,vz
+    # Not used since we publish NaN for velocity, but required by message
+    velocity_variance: [0.1, 0.1, 0.1]
