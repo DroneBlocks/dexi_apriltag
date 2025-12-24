@@ -17,6 +17,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(dexi_interfaces REQUIRED)
 
 include_directories(include)
 
@@ -32,22 +33,6 @@ ament_target_dependencies(
   "px4_msgs"
   "apriltag_msgs"
   "sensor_msgs"
-  "geometry_msgs"
-  "tf2_ros"
-  "tf2"
-)
-
-# AprilTag Odometry
-add_executable(apriltag_odometry src/apriltag_odometry.cpp)
-target_include_directories(apriltag_odometry PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
-target_compile_features(apriltag_odometry PUBLIC c_std_99 cxx_std_17)
-ament_target_dependencies(
-  apriltag_odometry
-  "rclcpp"
-  "px4_msgs"
-  "apriltag_msgs"
   "geometry_msgs"
   "tf2_ros"
   "tf2"
@@ -71,7 +56,7 @@ ament_target_dependencies(
   "image_transport"
 )
 
-install(TARGETS apriltag_follower apriltag_odometry apriltag_visualizer
+install(TARGETS apriltag_follower apriltag_visualizer
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY
@@ -83,6 +68,12 @@ install(DIRECTORY
   launch
   config
   DESTINATION share/${PROJECT_NAME}
+)
+
+# Install Python scripts
+install(PROGRAMS
+  scripts/precision_landing.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)
