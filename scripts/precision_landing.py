@@ -389,11 +389,17 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info('Precision landing interrupted')
-        node.set_led_color('black')
+        pass  # Clean exit on Ctrl+C
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # Safely clean up - context may already be invalid
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
