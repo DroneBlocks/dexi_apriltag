@@ -5,7 +5,8 @@ Precision Landing using AprilTag detection.
 State machine:
 1. SEARCHING: Looking for AprilTag (LED off/default)
 2. DETECTED: Tag found, waiting 5 seconds (LED purple)
-3. CENTERING: Moving to center over tag (LED white)
+3. CENTERING: Slow movement (10cm/s) with heavy filtering (LED white)
+   - Requires stable lock for 2s before descent
 4. LANDING: Descending while staying centered (LED red)
 5. LANDED: On ground (LED green briefly, then off)
 
@@ -18,11 +19,13 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import tf2_ros
 from px4_msgs.msg import TrajectorySetpoint, OffboardControlMode, VehicleLocalPosition, VehicleCommand
+from std_msgs.msg import Bool
 from dexi_interfaces.srv import LEDRingColor
 import time
 import math
 from math import cos, sin
 from enum import Enum
+from collections import deque
 
 
 class LandingState(Enum):
@@ -41,9 +44,10 @@ class PrecisionLanding(Node):
         self.declare_parameter('tag_family', 'tag36h11')
         self.declare_parameter('target_tag_id', 0)  # 0 = any tag
         self.declare_parameter('detection_delay', 5.0)  # seconds to wait after detection
-        self.declare_parameter('centering_threshold', 0.15)  # meters - when centered enough
-        self.declare_parameter('centering_gain', 0.5)  # P-gain for centering
-        self.declare_parameter('max_horizontal_speed', 0.5)  # m/s
+        self.declare_parameter('centering_threshold', 0.25)  # meters - when centered enough
+        self.declare_parameter('stable_centering_duration', 2.0)  # seconds - must stay centered before descent
+        self.declare_parameter('centering_speed', 0.05)  # m/s - very slow for indoor (5cm/s)
+        self.declare_parameter('filter_length', 5)  # Moving average filter (ModalAI approach)
         self.declare_parameter('descent_rate', 0.3)  # m/s
         self.declare_parameter('landing_altitude', 0.15)  # meters above ground to detect landing
         self.declare_parameter('final_descent_rate', 0.15)  # slower descent near ground
@@ -53,8 +57,9 @@ class PrecisionLanding(Node):
         self.target_tag_id = self.get_parameter('target_tag_id').value
         self.detection_delay = self.get_parameter('detection_delay').value
         self.centering_threshold = self.get_parameter('centering_threshold').value
-        self.centering_gain = self.get_parameter('centering_gain').value
-        self.max_horizontal_speed = self.get_parameter('max_horizontal_speed').value
+        self.stable_centering_duration = self.get_parameter('stable_centering_duration').value
+        self.centering_speed = self.get_parameter('centering_speed').value
+        self.filter_length = self.get_parameter('filter_length').value
         self.descent_rate = self.get_parameter('descent_rate').value
         self.landing_altitude = self.get_parameter('landing_altitude').value
         self.final_descent_rate = self.get_parameter('final_descent_rate').value
@@ -78,6 +83,8 @@ class PrecisionLanding(Node):
             TrajectorySetpoint, '/fmu/in/trajectory_setpoint', px4_qos)
         self.vehicle_command_pub = self.create_publisher(
             VehicleCommand, '/fmu/in/vehicle_command', px4_qos)
+        self.pause_setpoints_pub = self.create_publisher(
+            Bool, '/dexi/pause_setpoints', 10)
 
         # Subscribers
         self.local_pos_sub = self.create_subscription(
@@ -105,6 +112,11 @@ class PrecisionLanding(Node):
         self.last_tag_x = None
         self.last_tag_y = None
         self.ground_contact_time = None  # Time when we first detected ground contact
+        self.centered_since = None  # Time when drone first became centered (for stable lock)
+
+        # Moving average filter buffers (ModalAI approach)
+        self.tag_x_buffer = deque(maxlen=self.filter_length)
+        self.tag_y_buffer = deque(maxlen=self.filter_length)
 
         # Control loop timer (20 Hz)
         self.control_timer = self.create_timer(0.05, self.control_loop)
@@ -116,6 +128,16 @@ class PrecisionLanding(Node):
         self.get_logger().info(f'Looking for tag: {self.tag_family}:{self.target_tag_id}')
         self.get_logger().info('Waiting for tag detection...')
 
+    def pause_offboard_setpoints(self, pause: bool):
+        """Pause or resume offboard manager setpoint publishing."""
+        msg = Bool()
+        msg.data = pause
+        self.pause_setpoints_pub.publish(msg)
+        if pause:
+            self.get_logger().info('Paused offboard manager setpoints')
+        else:
+            self.get_logger().info('Resumed offboard manager setpoints')
+
     def local_position_callback(self, msg):
         """Track current position, altitude, velocity, and heading."""
         self.drone_x = msg.x  # NED North
@@ -124,6 +146,13 @@ class PrecisionLanding(Node):
         self.current_altitude = -msg.z  # Convert NED to altitude
         self.current_vz = msg.vz  # Vertical velocity (positive = down in NED)
         self.drone_heading = msg.heading  # Heading in radians (0 = North, positive = clockwise)
+
+    def get_filtered_tag_position(self):
+        """Get moving average of tag position. Returns (x, y) or (None, None) if no data."""
+        if len(self.tag_x_buffer) == 0:
+            return None, None
+        return sum(self.tag_x_buffer) / len(self.tag_x_buffer), \
+               sum(self.tag_y_buffer) / len(self.tag_y_buffer)
 
     def get_tag_position(self):
         """Get AprilTag position from TF. Returns True if tag found."""
@@ -163,6 +192,10 @@ class PrecisionLanding(Node):
             self.tag_z = new_tag_z
             self.last_tag_x = new_tag_x
             self.last_tag_y = new_tag_y
+
+            # Add to moving average buffers (ModalAI approach)
+            self.tag_x_buffer.append(new_tag_x)
+            self.tag_y_buffer.append(new_tag_y)
 
             if self.last_tag_update is None:
                 self.last_tag_update = time.time()
@@ -207,6 +240,17 @@ class PrecisionLanding(Node):
         vy_ned = vx_body * sin_h + vy_body * cos_h
 
         return vx_ned, vy_ned
+
+    def send_hold_position(self, target_x, target_y, target_z):
+        """Hold at a specific NED position."""
+        msg = TrajectorySetpoint()
+        msg.timestamp = int(time.time() * 1e6)
+        msg.position = [target_x, target_y, target_z]
+        msg.velocity = [0.0, 0.0, 0.0]
+        msg.acceleration = [float('nan'), float('nan'), float('nan')]
+        msg.yaw = float('nan')
+        msg.yawspeed = 0.0
+        self.setpoint_pub.publish(msg)
 
     def send_position_setpoint(self, vx_body, vy_body, vz):
         """Send position setpoint based on desired body-frame velocities.
@@ -280,6 +324,7 @@ class PrecisionLanding(Node):
                 # Delay complete, start centering
                 self.get_logger().info('Starting centering maneuver')
                 self.set_led_color('white')
+                self.pause_offboard_setpoints(True)  # Take control from offboard manager
                 self.state = LandingState.CENTERING
             else:
                 # Still waiting, hold position
@@ -288,55 +333,74 @@ class PrecisionLanding(Node):
                 self.send_position_setpoint(0.0, 0.0, 0.0)
 
         elif self.state == LandingState.CENTERING:
+            # Very slow continuous movement toward filtered tag position
             if not tag_found:
-                # Lost tag during centering
-                self.get_logger().warn('Tag lost during centering! Holding position...')
-                self.send_position_setpoint(0.0, 0.0, 0.0)
-            else:
-                # Calculate velocity to center over tag
-                # tag_x is forward offset, tag_y is right offset
-                error_x = self.tag_x
-                error_y = self.tag_y
+                self.get_logger().warn('Tag lost! Holding position...', throttle_duration_sec=1.0)
+                self.send_hold_position(self.drone_x, self.drone_y, self.drone_z)
+                self.centered_since = None
+                return
 
-                # Proportional control - move TOWARD the tag
-                vx = max(-self.max_horizontal_speed,
-                        min(self.max_horizontal_speed, self.centering_gain * error_x))
-                vy = max(-self.max_horizontal_speed,
-                        min(self.max_horizontal_speed, self.centering_gain * error_y))
+            # Use moving average filtered position
+            filtered_x, filtered_y = self.get_filtered_tag_position()
+            error_x = filtered_x if filtered_x is not None else self.tag_x
+            error_y = filtered_y if filtered_y is not None else self.tag_y
+            error_magnitude = math.sqrt(error_x**2 + error_y**2)
 
-                # Check if centered enough
-                error_magnitude = math.sqrt(error_x**2 + error_y**2)
+            if error_magnitude < self.centering_threshold:
+                # Centered - track stable duration
+                if self.centered_since is None:
+                    self.centered_since = time.time()
+                    self.get_logger().info(f'Centered! Holding for {self.stable_centering_duration:.1f}s...')
 
-                # Calculate NED velocities for logging
-                vx_ned, vy_ned = self.body_to_ned(vx, vy)
-                self.get_logger().info(
-                    f'Centering: offset=[{error_x:.2f}, {error_y:.2f}]m, err={error_magnitude:.2f}m, pos=[{self.drone_x:.2f}, {self.drone_y:.2f}]',
-                    throttle_duration_sec=0.5)
-
-                if error_magnitude < self.centering_threshold:
-                    self.get_logger().info('Centered! Beginning descent...')
+                stable_time = time.time() - self.centered_since
+                if stable_time >= self.stable_centering_duration:
+                    self.get_logger().info('Stable lock confirmed! Beginning descent...')
                     self.set_led_color('red')
                     self.state = LandingState.LANDING
                 else:
-                    # Continue centering (no vertical movement)
-                    self.send_position_setpoint(vx, vy, 0.0)
+                    remaining = self.stable_centering_duration - stable_time
+                    self.get_logger().info(
+                        f'Holding: err={error_magnitude:.2f}m, lock in {remaining:.1f}s',
+                        throttle_duration_sec=0.5)
+                    # Hold current position
+                    self.send_hold_position(self.drone_x, self.drone_y, self.drone_z)
+            else:
+                # Not centered - move very slowly toward tag
+                self.centered_since = None
+
+                # Normalize direction and apply fixed slow speed
+                vx = (error_x / error_magnitude) * self.centering_speed
+                vy = (error_y / error_magnitude) * self.centering_speed
+
+                self.get_logger().info(
+                    f'Centering: err={error_magnitude:.2f}m, filtered=[{error_x:.2f}, {error_y:.2f}]',
+                    throttle_duration_sec=0.5)
+
+                # Move slowly toward tag
+                self.send_position_setpoint(vx, vy, 0.0)
 
         elif self.state == LandingState.LANDING:
-            # Calculate centering velocities (even if tag lost, we use last known)
+            # During landing, descend while trying to stay centered
             if tag_found:
-                error_x = self.tag_x
-                error_y = self.tag_y
+                filtered_x, filtered_y = self.get_filtered_tag_position()
+                error_x = filtered_x if filtered_x is not None else self.tag_x
+                error_y = filtered_y if filtered_y is not None else self.tag_y
             else:
-                # Tag lost - continue with zero horizontal velocity
+                # Tag lost - descend straight
                 error_x = 0.0
                 error_y = 0.0
                 self.get_logger().warn('Tag lost during landing, descending straight...',
                                       throttle_duration_sec=1.0)
 
-            vx = max(-self.max_horizontal_speed,
-                    min(self.max_horizontal_speed, self.centering_gain * error_x))
-            vy = max(-self.max_horizontal_speed,
-                    min(self.max_horizontal_speed, self.centering_gain * error_y))
+            error_magnitude = math.sqrt(error_x**2 + error_y**2)
+
+            # Move at same slow centering speed
+            if error_magnitude > 0.05:
+                vx = (error_x / error_magnitude) * self.centering_speed
+                vy = (error_y / error_magnitude) * self.centering_speed
+            else:
+                vx = 0.0
+                vy = 0.0
 
             # Use slower descent rate when close to ground
             if self.current_altitude < 0.5:
@@ -362,6 +426,7 @@ class PrecisionLanding(Node):
                     self.get_logger().info('Landing confirmed! Disarming...')
                     self.set_led_color('green')
                     self.send_disarm_command()
+                    self.pause_offboard_setpoints(False)  # Resume offboard manager
                     self.state = LandingState.LANDED
             else:
                 self.ground_contact_time = None  # Reset if conditions not met
@@ -374,6 +439,9 @@ class PrecisionLanding(Node):
                 # Reset state variables
                 self.detection_time = None
                 self.ground_contact_time = None
+                self.centered_since = None
+                self.tag_x_buffer.clear()
+                self.tag_y_buffer.clear()
                 self.last_tag_update = None
                 self.last_tag_x = None
                 self.last_tag_y = None
@@ -391,6 +459,11 @@ def main(args=None):
     except KeyboardInterrupt:
         pass  # Clean exit on Ctrl+C
     finally:
+        # Resume offboard manager setpoints before shutting down
+        try:
+            node.pause_offboard_setpoints(False)
+        except Exception:
+            pass
         # Safely clean up - context may already be invalid
         try:
             node.destroy_node()

@@ -73,6 +73,8 @@ install(DIRECTORY
 # Install Python scripts
 install(PROGRAMS
   scripts/precision_landing.py
+  scripts/apriltag_odometry.py
+  scripts/test_visual_odometry.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
