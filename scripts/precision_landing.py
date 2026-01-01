@@ -5,8 +5,8 @@ Precision Landing using AprilTag detection.
 State machine:
 1. SEARCHING: Looking for AprilTag (LED off/default)
 2. DETECTED: Tag found, waiting 5 seconds (LED purple)
-3. CENTERING: Slow movement (10cm/s) with heavy filtering (LED white)
-   - Requires stable lock for 2s before descent
+3. CENTERING: Slow movement (10cm/s) with filtering (LED white)
+   - Requires stable lock for 1.5s before descent
 4. LANDING: Descending while staying centered (LED red)
 5. LANDED: On ground (LED green briefly, then off)
 
@@ -45,9 +45,9 @@ class PrecisionLanding(Node):
         self.declare_parameter('target_tag_id', 0)  # 0 = any tag
         self.declare_parameter('detection_delay', 5.0)  # seconds to wait after detection
         self.declare_parameter('centering_threshold', 0.25)  # meters - when centered enough
-        self.declare_parameter('stable_centering_duration', 2.0)  # seconds - must stay centered before descent
-        self.declare_parameter('centering_speed', 0.05)  # m/s - very slow for indoor (5cm/s)
-        self.declare_parameter('filter_length', 5)  # Moving average filter (ModalAI approach)
+        self.declare_parameter('stable_centering_duration', 1.5)  # seconds - must stay centered before descent
+        self.declare_parameter('centering_speed', 0.10)  # m/s - slow for indoor (10cm/s)
+        self.declare_parameter('filter_length', 5)  # Moving average filter samples
         self.declare_parameter('descent_rate', 0.3)  # m/s
         self.declare_parameter('landing_altitude', 0.15)  # meters above ground to detect landing
         self.declare_parameter('final_descent_rate', 0.15)  # slower descent near ground
@@ -125,7 +125,10 @@ class PrecisionLanding(Node):
         self.heartbeat_timer = self.create_timer(0.1, self.send_heartbeat)
 
         self.get_logger().info('Precision Landing initialized')
-        self.get_logger().info(f'Looking for tag: {self.tag_family}:{self.target_tag_id}')
+        self.get_logger().info(f'Tag: {self.tag_family}:{self.target_tag_id}')
+        self.get_logger().info(f'Centering: threshold={self.centering_threshold}m, speed={self.centering_speed}m/s, lock={self.stable_centering_duration}s')
+        self.get_logger().info(f'Landing: descent={self.descent_rate}m/s, final={self.final_descent_rate}m/s, detect_alt={self.landing_altitude}m')
+        self.get_logger().info(f'Filter: {self.filter_length} samples, detection_delay={self.detection_delay}s')
         self.get_logger().info('Waiting for tag detection...')
 
     def pause_offboard_setpoints(self, pause: bool):

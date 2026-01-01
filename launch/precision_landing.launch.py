@@ -61,18 +61,23 @@ def generate_launch_description():
 
     ld.add_action(DeclareLaunchArgument(
         'centering_threshold',
-        default_value='0.15',
+        default_value='0.25',
         description='Distance threshold (m) to consider centered'))
 
     ld.add_action(DeclareLaunchArgument(
-        'centering_gain',
-        default_value='0.5',
-        description='Proportional gain for centering'))
+        'centering_speed',
+        default_value='0.10',
+        description='Horizontal centering speed (m/s)'))
 
     ld.add_action(DeclareLaunchArgument(
-        'max_horizontal_speed',
-        default_value='0.5',
-        description='Maximum horizontal speed (m/s)'))
+        'stable_centering_duration',
+        default_value='1.5',
+        description='Seconds to hold center before descent'))
+
+    ld.add_action(DeclareLaunchArgument(
+        'filter_length',
+        default_value='5',
+        description='Moving average filter samples'))
 
     ld.add_action(DeclareLaunchArgument(
         'descent_rate',
@@ -100,8 +105,9 @@ def generate_launch_description():
     camera_yaw = LaunchConfiguration('camera_yaw')
     detection_delay = LaunchConfiguration('detection_delay')
     centering_threshold = LaunchConfiguration('centering_threshold')
-    centering_gain = LaunchConfiguration('centering_gain')
-    max_horizontal_speed = LaunchConfiguration('max_horizontal_speed')
+    centering_speed = LaunchConfiguration('centering_speed')
+    stable_centering_duration = LaunchConfiguration('stable_centering_duration')
+    filter_length = LaunchConfiguration('filter_length')
     descent_rate = LaunchConfiguration('descent_rate')
     final_descent_rate = LaunchConfiguration('final_descent_rate')
     landing_altitude = LaunchConfiguration('landing_altitude')
@@ -131,8 +137,9 @@ def generate_launch_description():
             'target_tag_id': target_tag_id,
             'detection_delay': detection_delay,
             'centering_threshold': centering_threshold,
-            'centering_gain': centering_gain,
-            'max_horizontal_speed': max_horizontal_speed,
+            'centering_speed': centering_speed,
+            'stable_centering_duration': stable_centering_duration,
+            'filter_length': filter_length,
             'descent_rate': descent_rate,
             'final_descent_rate': final_descent_rate,
             'landing_altitude': landing_altitude,

@@ -35,17 +35,27 @@ param set EKF2_GPS_CTRL 0     # Disable GPS (if not available)
 
 ### precision_landing
 
-Autonomous precision landing on an AprilTag. Designed for body-fixed cameras with slow movement and heavy filtering to prevent orbiting.
+Autonomous precision landing on an AprilTag. Designed for body-fixed cameras with slow movement and filtering to prevent orbiting.
 
-States: SEARCHING → DETECTED (5s wait) → CENTERING (2s stable lock) → LANDING → LANDED
+States: SEARCHING → DETECTED (5s wait) → CENTERING (1.5s stable lock) → LANDING → LANDED
 
 LED feedback: Off → Purple → White → Red → Green
 
 Features:
-- Slow centering (5cm/s) to minimize camera tilt
-- Moving average filter (5 samples, ModalAI approach)
-- Stable lock required before descent (must stay centered 2s)
+- Slow centering (10cm/s) to minimize camera tilt
+- Moving average filter (5 samples) for smooth position tracking
+- Stable lock required before descent (must stay centered 1.5s)
 - Pauses `px4_offboard_manager` setpoints during landing
+
+Parameters:
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `centering_threshold` | 0.25m | Distance from center to consider "centered" |
+| `centering_speed` | 0.10 m/s | Horizontal movement speed during centering |
+| `stable_centering_duration` | 1.5s | Time to hold center before descent |
+| `detection_delay` | 5.0s | Wait time after first detecting tag |
+| `descent_rate` | 0.3 m/s | Descent speed during landing |
+| `filter_length` | 5 | Moving average filter samples |
 
 ```bash
 # Land on tag ID 0 (default)
