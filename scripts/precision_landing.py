@@ -106,6 +106,7 @@ class PrecisionLanding(Node):
         self.drone_x = 0.0  # Current position NED X (North)
         self.drone_y = 0.0  # Current position NED Y (East)
         self.drone_z = 0.0  # Current position NED Z (Down)
+        self.last_position_time = None  # Track position freshness
         self.tag_visible = False
         self.tag_x = 0.0  # Tag position relative to drone (forward)
         self.tag_y = 0.0  # Tag position relative to drone (right)
@@ -152,6 +153,7 @@ class PrecisionLanding(Node):
         self.current_altitude = -msg.z  # Convert NED to altitude
         self.current_vz = msg.vz  # Vertical velocity (positive = down in NED)
         self.drone_heading = msg.heading  # Heading in radians (0 = North, positive = clockwise)
+        self.last_position_time = time.time()
 
     def get_filtered_tag_position(self):
         """Get moving average of tag position. Returns (x, y) or (None, None) if no data."""
@@ -166,7 +168,7 @@ class PrecisionLanding(Node):
         try:
             transform = self.tf_buffer.lookup_transform(
                 'base_link', tag_frame, rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=0.1))
+                timeout=rclpy.duration.Duration(seconds=0.02))  # 20ms timeout to not block control loop
 
             # Tag position relative to drone in body frame
             # TF frame mapping (empirically determined):
@@ -224,8 +226,8 @@ class PrecisionLanding(Node):
         """Send offboard control mode heartbeat."""
         msg = OffboardControlMode()
         msg.timestamp = int(time.time() * 1e6)
-        msg.position = True  # Using position control like apriltag_follower
-        msg.velocity = False
+        msg.position = True  # Primary: position control
+        msg.velocity = True  # Fallback: velocity control when position is stale
         msg.acceleration = False
         msg.attitude = False
         msg.body_rate = False
@@ -267,20 +269,34 @@ class PrecisionLanding(Node):
         msg = TrajectorySetpoint()
         msg.timestamp = int(time.time() * 1e6)
 
+        # Check if position data is fresh (< 200ms old)
+        position_stale = False
+        if self.last_position_time is not None:
+            pos_age = time.time() - self.last_position_time
+            if pos_age > 0.2:
+                position_stale = True
+                self.get_logger().warn(f'Position data stale ({pos_age:.2f}s)! Using velocity-only mode.',
+                                      throttle_duration_sec=1.0)
+
         # Convert body-frame velocities to NED world-frame
         vx_ned, vy_ned = self.body_to_ned(vx_body, vy_body)
 
-        # Compute target position (current + velocity * dt)
-        dt = 0.2  # Time horizon for position command (same as apriltag_follower)
-        target_x = self.drone_x + vx_ned * dt
-        target_y = self.drone_y + vy_ned * dt
-        target_z = self.drone_z + vz * dt  # vz is already in NED (positive = down)
+        if position_stale:
+            # Position data is stale - use velocity-only control
+            msg.position = [float('nan'), float('nan'), float('nan')]
+            msg.velocity = [vx_ned, vy_ned, vz]
+        else:
+            # Compute target position (current + velocity * dt)
+            dt = 0.2  # Time horizon for position command (same as apriltag_follower)
+            target_x = self.drone_x + vx_ned * dt
+            target_y = self.drone_y + vy_ned * dt
+            target_z = self.drone_z + vz * dt  # vz is already in NED (positive = down)
 
-        # Position setpoint in NED
-        msg.position = [target_x, target_y, target_z]
+            # Position setpoint in NED
+            msg.position = [target_x, target_y, target_z]
 
-        # Velocity hint (optional, helps with smooth motion)
-        msg.velocity = [vx_ned, vy_ned, vz]
+            # Velocity hint (optional, helps with smooth motion)
+            msg.velocity = [vx_ned, vy_ned, vz]
 
         # No acceleration control
         msg.acceleration = [float('nan'), float('nan'), float('nan')]
