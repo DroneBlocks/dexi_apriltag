@@ -440,10 +440,16 @@ class PrecisionLanding(Node):
                 self.centered_since = None
                 return
 
-            # Move at FASTER landing centering speed (perspective changes rapidly during descent)
-            if error_magnitude > 0.05:
-                vx = (error_x / error_magnitude) * self.landing_centering_speed
-                vy = (error_y / error_magnitude) * self.landing_centering_speed
+            # Use PROPORTIONAL control during landing to prevent orbiting/overshoot
+            # Speed scales linearly with distance: 0.05m/s per 0.1m of offset
+            # This prevents the oscillation caused by fixed-speed control
+            gain = 0.5  # m/s per meter of offset
+            max_speed = self.landing_centering_speed  # Cap at max speed
+
+            if error_magnitude > 0.02:
+                speed = min(error_magnitude * gain, max_speed)
+                vx = (error_x / error_magnitude) * speed
+                vy = (error_y / error_magnitude) * speed
             else:
                 vx = 0.0
                 vy = 0.0
