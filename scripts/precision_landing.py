@@ -47,6 +47,7 @@ class PrecisionLanding(Node):
         self.declare_parameter('centering_threshold', 0.25)  # meters - when centered enough
         self.declare_parameter('stable_centering_duration', 1.5)  # seconds - must stay centered before descent
         self.declare_parameter('centering_speed', 0.10)  # m/s - slow for indoor (10cm/s)
+        self.declare_parameter('landing_centering_speed', 0.20)  # m/s - faster during descent
         self.declare_parameter('filter_length', 5)  # Moving average filter samples
         self.declare_parameter('descent_rate', 0.3)  # m/s
         self.declare_parameter('landing_altitude', 0.15)  # meters above ground to detect landing
@@ -59,6 +60,7 @@ class PrecisionLanding(Node):
         self.centering_threshold = self.get_parameter('centering_threshold').value
         self.stable_centering_duration = self.get_parameter('stable_centering_duration').value
         self.centering_speed = self.get_parameter('centering_speed').value
+        self.landing_centering_speed = self.get_parameter('landing_centering_speed').value
         self.filter_length = self.get_parameter('filter_length').value
         self.descent_rate = self.get_parameter('descent_rate').value
         self.landing_altitude = self.get_parameter('landing_altitude').value
@@ -126,20 +128,21 @@ class PrecisionLanding(Node):
 
         self.get_logger().info('Precision Landing initialized')
         self.get_logger().info(f'Tag: {self.tag_family}:{self.target_tag_id}')
-        self.get_logger().info(f'Centering: threshold={self.centering_threshold}m, speed={self.centering_speed}m/s, lock={self.stable_centering_duration}s')
+        self.get_logger().info(f'Centering: threshold={self.centering_threshold}m, speed={self.centering_speed}m/s, landing_speed={self.landing_centering_speed}m/s, lock={self.stable_centering_duration}s')
         self.get_logger().info(f'Landing: descent={self.descent_rate}m/s, final={self.final_descent_rate}m/s, detect_alt={self.landing_altitude}m')
         self.get_logger().info(f'Filter: {self.filter_length} samples, detection_delay={self.detection_delay}s')
         self.get_logger().info('Waiting for tag detection...')
 
-    def pause_offboard_setpoints(self, pause: bool):
+    def pause_offboard_setpoints(self, pause: bool, log: bool = False):
         """Pause or resume offboard manager setpoint publishing."""
         msg = Bool()
         msg.data = pause
         self.pause_setpoints_pub.publish(msg)
-        if pause:
-            self.get_logger().info('Paused offboard manager setpoints')
-        else:
-            self.get_logger().info('Resumed offboard manager setpoints')
+        if log:
+            if pause:
+                self.get_logger().info('Paused offboard manager setpoints')
+            else:
+                self.get_logger().info('Resumed offboard manager setpoints')
 
     def local_position_callback(self, msg):
         """Track current position, altitude, velocity, and heading."""
@@ -327,7 +330,7 @@ class PrecisionLanding(Node):
                 # Delay complete, start centering
                 self.get_logger().info('Starting centering maneuver')
                 self.set_led_color('white')
-                self.pause_offboard_setpoints(True)  # Take control from offboard manager
+                self.pause_offboard_setpoints(True, log=True)  # Take control from offboard manager
                 self.state = LandingState.CENTERING
             else:
                 # Still waiting, hold position
@@ -336,6 +339,9 @@ class PrecisionLanding(Node):
                 self.send_position_setpoint(0.0, 0.0, 0.0)
 
         elif self.state == LandingState.CENTERING:
+            # Re-assert pause every loop to handle message loss
+            self.pause_offboard_setpoints(True)
+
             # Very slow continuous movement toward filtered tag position
             if not tag_found:
                 self.get_logger().warn('Tag lost! Holding position...', throttle_duration_sec=1.0)
@@ -343,13 +349,16 @@ class PrecisionLanding(Node):
                 self.centered_since = None
                 return
 
-            # Use moving average filtered position
+            # Use RAW position for threshold check (prevents false "centered" during orbiting)
+            # The moving average can make it appear centered when averaging positions on both sides
+            raw_magnitude = math.sqrt(self.tag_x**2 + self.tag_y**2)
+
+            # Use filtered position for velocity commands (smoother motion)
             filtered_x, filtered_y = self.get_filtered_tag_position()
             error_x = filtered_x if filtered_x is not None else self.tag_x
             error_y = filtered_y if filtered_y is not None else self.tag_y
-            error_magnitude = math.sqrt(error_x**2 + error_y**2)
 
-            if error_magnitude < self.centering_threshold:
+            if raw_magnitude < self.centering_threshold:
                 # Centered - track stable duration
                 if self.centered_since is None:
                     self.centered_since = time.time()
@@ -363,7 +372,7 @@ class PrecisionLanding(Node):
                 else:
                     remaining = self.stable_centering_duration - stable_time
                     self.get_logger().info(
-                        f'Holding: err={error_magnitude:.2f}m, lock in {remaining:.1f}s',
+                        f'Holding: raw={raw_magnitude:.2f}m, lock in {remaining:.1f}s',
                         throttle_duration_sec=0.5)
                     # Hold current position
                     self.send_hold_position(self.drone_x, self.drone_y, self.drone_z)
@@ -372,22 +381,32 @@ class PrecisionLanding(Node):
                 self.centered_since = None
 
                 # Normalize direction and apply fixed slow speed
-                vx = (error_x / error_magnitude) * self.centering_speed
-                vy = (error_y / error_magnitude) * self.centering_speed
+                filtered_magnitude = math.sqrt(error_x**2 + error_y**2)
+                if filtered_magnitude > 0.01:
+                    vx = (error_x / filtered_magnitude) * self.centering_speed
+                    vy = (error_y / filtered_magnitude) * self.centering_speed
+                else:
+                    vx = 0.0
+                    vy = 0.0
 
                 self.get_logger().info(
-                    f'Centering: err={error_magnitude:.2f}m, filtered=[{error_x:.2f}, {error_y:.2f}]',
+                    f'Centering: raw={raw_magnitude:.2f}m, filtered={filtered_magnitude:.2f}m, pos=[{self.tag_x:.2f}, {self.tag_y:.2f}]',
                     throttle_duration_sec=0.5)
 
                 # Move slowly toward tag
                 self.send_position_setpoint(vx, vy, 0.0)
 
         elif self.state == LandingState.LANDING:
+            # Re-assert pause to ensure offboard manager doesn't interfere
+            # (handles case where pause message was lost or offboard manager restarted)
+            self.pause_offboard_setpoints(True)
+
             # During landing, descend while trying to stay centered
+            # Use FASTER centering speed during descent (perspective changes rapidly)
             if tag_found:
-                filtered_x, filtered_y = self.get_filtered_tag_position()
-                error_x = filtered_x if filtered_x is not None else self.tag_x
-                error_y = filtered_y if filtered_y is not None else self.tag_y
+                # Use raw position for offset - more responsive during descent
+                error_x = self.tag_x
+                error_y = self.tag_y
             else:
                 # Tag lost - descend straight
                 error_x = 0.0
@@ -397,10 +416,18 @@ class PrecisionLanding(Node):
 
             error_magnitude = math.sqrt(error_x**2 + error_y**2)
 
-            # Move at same slow centering speed
+            # Safety: if we've drifted too far from center, abort descent and re-center
+            if tag_found and error_magnitude > self.centering_threshold * 2:
+                self.get_logger().warn(f'Offset too large ({error_magnitude:.2f}m)! Returning to CENTERING...')
+                self.set_led_color('white')
+                self.state = LandingState.CENTERING
+                self.centered_since = None
+                return
+
+            # Move at FASTER landing centering speed (perspective changes rapidly during descent)
             if error_magnitude > 0.05:
-                vx = (error_x / error_magnitude) * self.centering_speed
-                vy = (error_y / error_magnitude) * self.centering_speed
+                vx = (error_x / error_magnitude) * self.landing_centering_speed
+                vy = (error_y / error_magnitude) * self.landing_centering_speed
             else:
                 vx = 0.0
                 vy = 0.0
@@ -411,10 +438,8 @@ class PrecisionLanding(Node):
             else:
                 descent = self.descent_rate
 
-            # Calculate NED velocities for logging
-            vx_ned, vy_ned = self.body_to_ned(vx, vy)
             self.get_logger().info(
-                f'Landing: alt={self.current_altitude:.2f}m, offset=[{error_x:.2f}, {error_y:.2f}]m, pos=[{self.drone_x:.2f}, {self.drone_y:.2f}]',
+                f'Landing: alt={self.current_altitude:.2f}m, offset={error_magnitude:.2f}m, raw=[{error_x:.2f}, {error_y:.2f}]',
                 throttle_duration_sec=0.5)
 
             # Send position setpoint - keep centering while descending
@@ -429,7 +454,7 @@ class PrecisionLanding(Node):
                     self.get_logger().info('Landing confirmed! Disarming...')
                     self.set_led_color('green')
                     self.send_disarm_command()
-                    self.pause_offboard_setpoints(False)  # Resume offboard manager
+                    self.pause_offboard_setpoints(False, log=True)  # Resume offboard manager
                     self.state = LandingState.LANDED
             else:
                 self.ground_contact_time = None  # Reset if conditions not met
@@ -464,7 +489,7 @@ def main(args=None):
     finally:
         # Resume offboard manager setpoints before shutting down
         try:
-            node.pause_offboard_setpoints(False)
+            node.pause_offboard_setpoints(False, log=True)
         except Exception:
             pass
         # Safely clean up - context may already be invalid
