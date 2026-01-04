@@ -305,6 +305,12 @@ class PrecisionLanding(Node):
         msg.yaw = float('nan')
         msg.yawspeed = 0.0
 
+        # Debug: log actual setpoint values
+        if self.state == LandingState.LANDING:
+            self.get_logger().debug(
+                f'Setpoint: pos=[{msg.position[0]:.2f},{msg.position[1]:.2f},{msg.position[2]:.2f}] '
+                f'vel=[{msg.velocity[0]:.2f},{msg.velocity[1]:.2f},{msg.velocity[2]:.2f}]')
+
         self.setpoint_pub.publish(msg)
 
     def send_disarm_command(self):
@@ -417,6 +423,12 @@ class PrecisionLanding(Node):
             # (handles case where pause message was lost or offboard manager restarted)
             self.pause_offboard_setpoints(True)
 
+            # Debug: log position freshness
+            if self.last_position_time is not None:
+                pos_age_ms = (time.time() - self.last_position_time) * 1000
+                if pos_age_ms > 100:
+                    self.get_logger().warn(f'Position age: {pos_age_ms:.0f}ms', throttle_duration_sec=0.5)
+
             # During landing, descend while trying to stay centered
             # Use FASTER centering speed during descent (perspective changes rapidly)
             if tag_found:
@@ -461,7 +473,7 @@ class PrecisionLanding(Node):
                 descent = self.descent_rate
 
             self.get_logger().info(
-                f'Landing: alt={self.current_altitude:.2f}m, offset={error_magnitude:.2f}m, raw=[{error_x:.2f}, {error_y:.2f}]',
+                f'Landing: alt={self.current_altitude:.2f}m, offset={error_magnitude:.2f}m, vz={descent:.2f}, vel=[{vx:.2f},{vy:.2f}]',
                 throttle_duration_sec=0.5)
 
             # Send position setpoint - keep centering while descending

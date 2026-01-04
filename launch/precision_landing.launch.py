@@ -67,7 +67,12 @@ def generate_launch_description():
     ld.add_action(DeclareLaunchArgument(
         'centering_speed',
         default_value='0.10',
-        description='Horizontal centering speed (m/s)'))
+        description='Horizontal centering speed during CENTERING phase (m/s)'))
+
+    ld.add_action(DeclareLaunchArgument(
+        'landing_centering_speed',
+        default_value='0.20',
+        description='Faster centering speed during LANDING phase (m/s)'))
 
     ld.add_action(DeclareLaunchArgument(
         'stable_centering_duration',
@@ -106,6 +111,7 @@ def generate_launch_description():
     detection_delay = LaunchConfiguration('detection_delay')
     centering_threshold = LaunchConfiguration('centering_threshold')
     centering_speed = LaunchConfiguration('centering_speed')
+    landing_centering_speed = LaunchConfiguration('landing_centering_speed')
     stable_centering_duration = LaunchConfiguration('stable_centering_duration')
     filter_length = LaunchConfiguration('filter_length')
     descent_rate = LaunchConfiguration('descent_rate')
@@ -138,6 +144,7 @@ def generate_launch_description():
             'detection_delay': detection_delay,
             'centering_threshold': centering_threshold,
             'centering_speed': centering_speed,
+            'landing_centering_speed': landing_centering_speed,
             'stable_centering_duration': stable_centering_duration,
             'filter_length': filter_length,
             'descent_rate': descent_rate,

@@ -43,15 +43,19 @@ LED feedback: Off → Purple → White → Red → Green
 
 Features:
 - Slow centering (10cm/s) to minimize camera tilt
-- Moving average filter (5 samples) for smooth position tracking
+- Moving average filter (5 samples) for smooth motion commands
+- Uses raw position for threshold checks (prevents false "centered" during orbiting)
+- Faster centering during descent (20cm/s) to track perspective changes
 - Stable lock required before descent (must stay centered 1.5s)
+- Safety abort: returns to CENTERING if offset exceeds 2x threshold during descent
 - Pauses `px4_offboard_manager` setpoints during landing
 
 Parameters:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `centering_threshold` | 0.25m | Distance from center to consider "centered" |
-| `centering_speed` | 0.10 m/s | Horizontal movement speed during centering |
+| `centering_speed` | 0.10 m/s | Horizontal movement speed during CENTERING |
+| `landing_centering_speed` | 0.20 m/s | Faster speed during LANDING (perspective changes) |
 | `stable_centering_duration` | 1.5s | Time to hold center before descent |
 | `detection_delay` | 5.0s | Wait time after first detecting tag |
 | `descent_rate` | 0.3 m/s | Descent speed during landing |
