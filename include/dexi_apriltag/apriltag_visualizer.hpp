@@ -6,7 +6,7 @@
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <apriltag_msgs/msg/april_tag_detection_array.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/opencv.hpp>
 #include <memory>
 
