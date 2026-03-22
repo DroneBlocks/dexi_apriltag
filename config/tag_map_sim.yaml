@@ -1,0 +1,26 @@
+# Tag map for AprilTagNavigationScene
+#
+# Grid: 2x10 (2 columns along X, 10 rows along Z)
+# Tag size: 0.15m (6 inches)
+# Spacing: 0.5m along X, 1.0m along Z
+# Grid starts at Unity/PX4 origin, extends in +Z direction
+#
+# Coordinate mapping: PX4 NED North = Unity Z, PX4 NED East = Unity X
+#
+# Tag layout (looking down, drone starts at tag 0/1):
+#   X = -0.25  X = +0.25
+#   [0]  [1]    Z = 0.0   (NED North = 0.0)  ← drone starts here
+#   [2]  [3]    Z = 1.0
+#   [4]  [5]    Z = 2.0
+#   [6]  [7]    Z = 3.0
+#   [8]  [9]    Z = 4.0
+#   [10] [11]   Z = 5.0
+#   [12] [13]   Z = 6.0
+#   [14] [15]   Z = 7.0
+#   [16] [17]   Z = 8.0
+#   [18] [19]   Z = 9.0   (NED North = 9.0)  ← fly to here
+
+tag_map:
+  ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  x:   [0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0, 5.0, 6.0, 6.0, 7.0, 7.0, 8.0, 8.0, 9.0, 9.0]   # NED North (Unity Z)
+  y:   [-0.25, 0.25, -0.25, 0.25, -0.25, 0.25, -0.25, 0.25, -0.25, 0.25, -0.25, 0.25, -0.25, 0.25, -0.25, 0.25, -0.25, 0.25, -0.25, 0.25]   # NED East (Unity X)
