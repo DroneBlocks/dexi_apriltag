@@ -9,10 +9,13 @@ This folder contains 20 AprilTag 36h11 PNGs (IDs 0-19) for printing.
 ## Printing
 
 - Print each tag on a standard **8.5×11 inch** sheet of paper
-- Scale the tag to **6 inches (15cm)** — centered on the page
+- The PNGs are pre-sized to **540×540 pixels at 72 DPI = 7.5 inches total**
+- At that size the **black area is 6 inches (15cm)** with a 0.75-inch white margin on each side
+- Just print at **100% scale** (no fit-to-page) — the tag will be centered with the correct margins
 - Use **matte paper** (not glossy — glare interferes with detection)
 - Standard black and white laser or inkjet printing works fine
 - Do **not** laminate (causes reflections)
+- **Orientation doesn't matter** — tags can be placed at any rotation, the detector handles it
 
 ## Grid Layout
 
@@ -57,6 +60,14 @@ Row 10:[Tag 18] [Tag 19]  ← END (9m from start)
 4. **Tape tags flat to the floor** — ensure no curling at edges. Use tape on all four corners
 
 5. **Tag IDs must match the positions** shown above. Tags 0 and 1 at the start, incrementing by 2 per row
+
+## Center-to-Center Distances
+
+| Measurement | Metric | Imperial |
+|---|---|---|
+| Same row (left ↔ right) | 0.5m | ~19.7 in |
+| Adjacent rows (along flight path) | 1.0m | ~39.4 in |
+| Diagonal (adjacent row, opposite column) | ~1.12m | ~44 in |
 
 ## What Matters
 
