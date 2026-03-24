@@ -1,7 +1,7 @@
 # Tag map for DEXIGridScene2
 #
 # Grid: 10x10 (100 tags), 1m spacing, centered at origin
-# Tag size: 0.15m (6 inches)
+# Tag size: 0.10m (4 inches) for real hardware, 0.15m (6 inches) in Unity sim
 # Tag family: 36h11
 #
 # Coordinate mapping: PX4 NED North = Unity Z, PX4 NED East = Unity X

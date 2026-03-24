@@ -9,8 +9,8 @@ This folder contains 20 AprilTag 36h11 PNGs (IDs 0-19) for printing.
 ## Printing
 
 - Print each tag on a standard **8.5×11 inch** sheet of paper
-- The PNGs are pre-sized to **540×540 pixels at 72 DPI = 7.5 inches total**
-- At that size the **black area is 6 inches (15cm)** with a 0.75-inch white margin on each side
+- The PNGs are pre-sized to **360×360 pixels at 72 DPI = 5 inches total**
+- At that size the **black area is 4 inches (10cm)** with a 0.5-inch white margin on each side
 - Just print at **100% scale** (no fit-to-page) — the tag will be centered with the correct margins
 - Use **matte paper** (not glossy — glare interferes with detection)
 - Standard black and white laser or inkjet printing works fine
@@ -78,10 +78,10 @@ Row 10:[Tag 18] [Tag 19]  ← END (9m from start)
 
 ## Camera Coverage
 
-At 2m flight altitude with the Pi Camera v2 (62° HFOV):
-- Camera sees a ~2.4m × 1.8m patch of floor
-- **4 tags visible** at any point along the path
-- If the drone drifts sideways, tags remain in view (field is wider than the grid)
+At 2m flight altitude with the Pi Camera v2 (IMX219 at 320×240, ~27° HFOV due to center-crop sensor mode):
+- Camera sees a ~0.95m × 0.71m patch of floor
+- **1-2 tags visible** at any point along the path
+- The narrow FOV is a hardware constraint — the IMX219 uses a center-crop (not full-sensor binning) at low resolutions
 
 ## PX4 Parameters for Real Hardware
 
@@ -101,11 +101,11 @@ param set MPC_XY_CRUISE 0.25    # Cruise speed (m/s)
 
 ## Bringup Launch File
 
-Update the tag size in your hardware launch file before flying:
+The tag size in the hardware bringup launch files is already set to match:
 
 ```python
 # In dexi_bringup_pi5.launch.py (or dexi_bringup_ark_cm4.launch.py):
-'size': 0.15,  # Must match physical tag size (6 inches = 0.15m)
+'size': 0.1,  # Must match physical tag size (4 inches = 0.10m)
 ```
 
 ## Testing Before Flight

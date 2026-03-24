@@ -1,7 +1,7 @@
 # Tag map for AprilTagNavigationScene
 #
 # Grid: 2x10 (2 columns along X, 10 rows along Z)
-# Tag size: 0.15m (6 inches)
+# Tag size: 0.10m (4 inches) for real hardware, 0.15m (6 inches) in Unity sim
 # Spacing: 0.5m along X, 1.0m along Z
 # Grid starts at Unity/PX4 origin, extends in +Z direction
 #

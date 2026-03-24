@@ -74,7 +74,7 @@ The tag map is defined in `config/tag_map_sim.yaml`. It maps tag IDs to NED worl
 - **x**: NED North position (meters) — corresponds to Unity Z axis
 - **y**: NED East position (meters) — corresponds to Unity X axis
 
-The Unity `AprilTagNavigationScene` has a 2×10 grid of 6-inch (0.15m) tags:
+The Unity `AprilTagNavigationScene` has a 2×10 grid of 6-inch (0.15m) tags in simulation (4-inch / 0.10m for real hardware):
 - 2 columns (X = -0.25m, +0.25m), 10 rows (Z = 0m to 9m)
 - Tag IDs 0-19, spacing: 0.5m across, 1.0m along flight path
 - Flight area: 15ft × 15ft × 40ft cage
