@@ -31,7 +31,7 @@ class AprilTagOdometry(Node):
         self.declare_parameter('tag_family', 'tag36h11')
         self.declare_parameter('target_tag_id', 0)
         self.declare_parameter('publish_rate', 10.0)  # Hz - slower to reduce oscillation
-        self.declare_parameter('position_variance', [2.0, 2.0, 100.0])  # Higher variance - less aggressive corrections
+        self.declare_parameter('position_variance', [10.0, 10.0, 100.0])  # High variance - gentle EKF2 corrections
         self.declare_parameter('orientation_variance', [0.01, 0.01, 0.01])
         self.declare_parameter('filter_length', 5)  # Moving average filter length (ModalAI default)
         self.declare_parameter('dry_run', False)  # If true, log but don't publish to EKF2
@@ -106,16 +106,14 @@ class AprilTagOdometry(Node):
         self.tag_visible = False
         self.last_publish_time = None
         self.last_visible_tag_id = None
+        self.current_tag_id = None  # Tag we're actively tracking
+        self.current_tag_distance = float('inf')
 
         # Origin offset - aligns tag/map frame with EKF2 frame
         self.origin_locked = False
         self.offset_north = 0.0
         self.offset_east = 0.0
         self.offset_down = 0.0
-        # Track EKF2 position to detect frame jumps (e.g., GPS disable)
-        self.last_ekf2_x = None
-        self.last_ekf2_y = None
-        self.last_ekf2_time = None
 
         # Moving average filter buffers (ModalAI approach)
         # Filter smooths position estimates to prevent EKF2 discontinuities
@@ -194,21 +192,37 @@ class AprilTagOdometry(Node):
         Returns (success, tag_id, tx, ty, tz, qw, qx, qy, qz)
         """
         if self.use_tag_map:
-            best_tag_id = None
-            best_transform = None
-            best_distance = float('inf')
-
+            # Collect all visible tags
+            visible_tags = {}
             for tag_id in self.tag_map:
                 result = self._lookup_tag_tf(tag_id)
                 if result is not None:
-                    transform, distance = result
-                    if distance < best_distance:
-                        best_distance = distance
-                        best_transform = transform
-                        best_tag_id = tag_id
+                    visible_tags[tag_id] = result
 
-            if best_transform is None:
+            if not visible_tags:
+                self.current_tag_id = None
+                self.current_tag_distance = float('inf')
                 return False, -1, 0, 0, 0, 1, 0, 0, 0
+
+            # Tag switching with hysteresis: stick with current tag unless
+            # another tag is >30% closer (prevents rapid bouncing)
+            best_tag_id = min(visible_tags, key=lambda tid: visible_tags[tid][1])
+            best_distance = visible_tags[best_tag_id][1]
+
+            if (self.current_tag_id is not None and
+                    self.current_tag_id in visible_tags):
+                current_distance = visible_tags[self.current_tag_id][1]
+                # Only switch if new tag is significantly closer
+                if best_distance < current_distance * 0.7:
+                    chosen_id = best_tag_id
+                else:
+                    chosen_id = self.current_tag_id
+            else:
+                chosen_id = best_tag_id
+
+            self.current_tag_id = chosen_id
+            self.current_tag_distance = visible_tags[chosen_id][1]
+            best_transform = visible_tags[chosen_id][0]
 
             t = best_transform.transform
             # Store TF timestamp
@@ -232,7 +246,7 @@ class AprilTagOdometry(Node):
                 self._last_tf_stamp = tf_stamp
                 self._stale_count = 0
 
-            return (True, best_tag_id,
+            return (True, chosen_id,
                     t.translation.x, t.translation.y, t.translation.z,
                     t.rotation.w, t.rotation.x, t.rotation.y, t.rotation.z)
 
@@ -299,22 +313,6 @@ class AprilTagOdometry(Node):
         body_forward = -ty
         body_right = -tz
         body_down = -tx
-
-        # Detect EKF2 frame jumps
-        now = time.time()
-        if self.origin_locked and self.last_ekf2_x is not None:
-            dt = now - self.last_ekf2_time
-            if dt > 0 and dt < 1.0:
-                dx = abs(self.drone_x - self.last_ekf2_x)
-                dy = abs(self.drone_y - self.last_ekf2_y)
-                velocity = math.sqrt(dx * dx + dy * dy) / dt
-                if velocity > 5.0 and (dx > 0.5 or dy > 0.5):
-                    self.get_logger().warn(
-                        f'EKF2 frame jump detected (moved {dx:.2f}, {dy:.2f} in {dt:.3f}s) - re-locking origin')
-                    self.origin_locked = False
-        self.last_ekf2_x = self.drone_x
-        self.last_ekf2_y = self.drone_y
-        self.last_ekf2_time = now
 
         # Calculate body-to-NED transform using current heading
         cos_h = math.cos(self.drone_heading)
