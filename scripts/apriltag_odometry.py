@@ -108,6 +108,8 @@ class AprilTagOdometry(Node):
         self.last_visible_tag_id = None
         self.current_tag_id = None  # Tag we're actively tracking
         self.current_tag_distance = float('inf')
+        self._tf_stamps = {}  # Per-tag TF timestamps for stale detection
+        self._stale_counts = {}  # Per-tag stale counters
 
         # Origin offset - aligns tag/map frame with EKF2 frame
         self.origin_locked = False
@@ -170,9 +172,11 @@ class AprilTagOdometry(Node):
         """Look up TF for a specific tag ID. Returns (transform, distance) or None."""
         tag_frame = f'{self.tag_family}:{tag_id}'
         try:
+            if not self.tf_buffer.can_transform(
+                    'base_link', tag_frame, rclpy.time.Time(seconds=0)):
+                return None
             transform = self.tf_buffer.lookup_transform(
-                'base_link', tag_frame, rclpy.time.Time(seconds=0),
-                timeout=rclpy.duration.Duration(seconds=0.01))
+                'base_link', tag_frame, rclpy.time.Time(seconds=0))
 
             tx = transform.transform.translation.x
             ty = transform.transform.translation.y
@@ -230,21 +234,18 @@ class AprilTagOdometry(Node):
                 best_transform.header.stamp.sec * 1e6 +
                 best_transform.header.stamp.nanosec / 1e3)
 
-            # Stale detection
+            # Per-tag stale detection
             tf_stamp = (best_transform.header.stamp.sec +
                         best_transform.header.stamp.nanosec / 1e9)
-            if not hasattr(self, '_last_tf_stamp'):
-                self._last_tf_stamp = tf_stamp
-            elif tf_stamp == self._last_tf_stamp:
-                if not hasattr(self, '_stale_count'):
-                    self._stale_count = 0
-                self._stale_count += 1
-                if self._stale_count > 5:
-                    self.get_logger().debug('TF stale - no new data', throttle_duration_sec=1.0)
+            last_stamp = self._tf_stamps.get(chosen_id, 0)
+            if tf_stamp == last_stamp:
+                self._stale_counts[chosen_id] = self._stale_counts.get(chosen_id, 0) + 1
+                if self._stale_counts[chosen_id] > 5:
+                    self.get_logger().debug(f'TF stale for tag {chosen_id}', throttle_duration_sec=1.0)
                     return False, -1, 0, 0, 0, 1, 0, 0, 0
             else:
-                self._last_tf_stamp = tf_stamp
-                self._stale_count = 0
+                self._tf_stamps[chosen_id] = tf_stamp
+                self._stale_counts[chosen_id] = 0
 
             return (True, chosen_id,
                     t.translation.x, t.translation.y, t.translation.z,
@@ -263,21 +264,19 @@ class AprilTagOdometry(Node):
                 transform.header.stamp.sec * 1e6 +
                 transform.header.stamp.nanosec / 1e3)
 
-            # Stale detection
+            # Per-tag stale detection
             tf_stamp = (transform.header.stamp.sec +
                         transform.header.stamp.nanosec / 1e9)
-            if not hasattr(self, '_last_tf_stamp'):
-                self._last_tf_stamp = tf_stamp
-            elif tf_stamp == self._last_tf_stamp:
-                if not hasattr(self, '_stale_count'):
-                    self._stale_count = 0
-                self._stale_count += 1
-                if self._stale_count > 5:
-                    self.get_logger().debug('TF stale - no new data', throttle_duration_sec=1.0)
+            tid = self.target_tag_id
+            last_stamp = self._tf_stamps.get(tid, 0)
+            if tf_stamp == last_stamp:
+                self._stale_counts[tid] = self._stale_counts.get(tid, 0) + 1
+                if self._stale_counts[tid] > 5:
+                    self.get_logger().debug(f'TF stale for tag {tid}', throttle_duration_sec=1.0)
                     return False, -1, 0, 0, 0, 1, 0, 0, 0
             else:
-                self._last_tf_stamp = tf_stamp
-                self._stale_count = 0
+                self._tf_stamps[tid] = tf_stamp
+                self._stale_counts[tid] = 0
 
             t = transform.transform
             return (True, self.target_tag_id,
