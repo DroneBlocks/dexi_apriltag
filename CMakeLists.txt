@@ -16,8 +16,25 @@ find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(dexi_interfaces REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2 REQUIRED)
 
 include_directories(include)
+
+# AprilTag Odometry (C++)
+add_executable(apriltag_odometry_node src/apriltag_odometry.cpp)
+target_include_directories(apriltag_odometry_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_compile_features(apriltag_odometry_node PUBLIC cxx_std_17)
+ament_target_dependencies(
+  apriltag_odometry_node
+  "rclcpp"
+  "px4_msgs"
+  "apriltag_msgs"
+  "tf2_ros"
+  "tf2"
+)
 
 # AprilTag Visualizer
 add_executable(apriltag_visualizer src/apriltag_visualizer.cpp)
@@ -37,7 +54,7 @@ ament_target_dependencies(
   "image_transport"
 )
 
-install(TARGETS apriltag_visualizer
+install(TARGETS apriltag_odometry_node apriltag_visualizer
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY
@@ -55,7 +72,7 @@ install(DIRECTORY
 install(PROGRAMS
   scripts/apriltag_odometry.py
   scripts/precision_landing.py
-  scripts/corridor_navigation.py
+  scripts/tag_navigate_and_land.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
