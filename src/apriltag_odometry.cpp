@@ -17,6 +17,7 @@ AprilTagOdometry::AprilTagOdometry(const rclcpp::NodeOptions & options)
     this->declare_parameter("orientation_variance", std::vector<double>{0.01, 0.01, 0.01});
     this->declare_parameter("filter_length", 5);
     this->declare_parameter("dry_run", false);
+    this->declare_parameter("origin_lock_delay", 5.0);
     this->declare_parameter("tag_map_ids", std::vector<int64_t>{});
     this->declare_parameter("tag_map_x", std::vector<double>{});
     this->declare_parameter("tag_map_y", std::vector<double>{});
@@ -29,6 +30,7 @@ AprilTagOdometry::AprilTagOdometry(const rclcpp::NodeOptions & options)
     orientation_variance_ = this->get_parameter("orientation_variance").as_double_array();
     filter_length_ = this->get_parameter("filter_length").as_int();
     dry_run_ = this->get_parameter("dry_run").as_bool();
+    origin_lock_delay_ = this->get_parameter("origin_lock_delay").as_double();
 
     // Build tag map
     use_tag_map_ = false;
@@ -64,6 +66,15 @@ AprilTagOdometry::AprilTagOdometry(const rclcpp::NodeOptions & options)
     detection_sub_ = this->create_subscription<apriltag_msgs::msg::AprilTagDetectionArray>(
         "/apriltag_detections", 10,
         std::bind(&AprilTagOdometry::detectionCallback, this, std::placeholders::_1));
+
+    // Subscribe to estimator status flags — wait for flow+range before origin lock
+    estimator_sub_ = this->create_subscription<px4_msgs::msg::EstimatorStatusFlags>(
+        "/fmu/out/estimator_status_flags", px4_qos,
+        [this](const px4_msgs::msg::EstimatorStatusFlags::SharedPtr msg) {
+            ekf_ev_pos_active_ = msg->cs_ev_pos;
+            ekf_opt_flow_active_ = msg->cs_opt_flow;
+            ekf_rng_hgt_active_ = msg->cs_rng_hgt;
+        });
 
     // Publish timer
     auto period = std::chrono::duration<double>(1.0 / publish_rate_);
@@ -318,6 +329,31 @@ void AprilTagOdometry::publishOdometry()
     double heading = latest_image_yaw_ + image_yaw_offset_;
 
     if (!origin_locked_) {
+        // Wait for optical flow + range sensor to be active in the EKF before locking.
+        // This ensures the EKF is in a healthy state and will accept our vision data.
+        if (!ekf_opt_flow_active_ && !ekf_rng_hgt_active_) {
+            if (!first_tag_seen_) {
+                first_tag_seen_ = true;
+                RCLCPP_INFO(get_logger(),
+                    "Tag %d visible — waiting for EKF flow+range before origin lock...", tag_id);
+            }
+            return;
+        }
+
+        // Also enforce minimum delay after first tag seen
+        auto now = std::chrono::steady_clock::now();
+        if (first_tag_seen_ && std::chrono::duration<double>(now - first_tag_time_).count() < origin_lock_delay_) {
+            return;
+        }
+        if (!first_tag_seen_) {
+            first_tag_seen_ = true;
+            first_tag_time_ = now;
+            RCLCPP_INFO(get_logger(),
+                "Tag %d visible, EKF sensors active — waiting %.1fs before origin lock...",
+                tag_id, origin_lock_delay_);
+            return;
+        }
+
         // Calibrate: what offset aligns image_yaw with the EKF heading?
         image_yaw_offset_ = drone_heading_ - latest_image_yaw_;
         heading = drone_heading_;  // First frame uses EKF heading exactly

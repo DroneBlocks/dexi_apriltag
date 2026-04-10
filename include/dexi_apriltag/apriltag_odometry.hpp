@@ -6,6 +6,7 @@
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_attitude.hpp>
+#include <px4_msgs/msg/estimator_status_flags.hpp>
 #include <apriltag_msgs/msg/april_tag_detection_array.hpp>
 
 #include <deque>
@@ -60,6 +61,7 @@ private:
     rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_pos_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr attitude_sub_;
     rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detection_sub_;
+    rclcpp::Subscription<px4_msgs::msg::EstimatorStatusFlags>::SharedPtr estimator_sub_;
     rclcpp::TimerBase::SharedPtr publish_timer_;
 
     // Drone state
@@ -72,6 +74,9 @@ private:
     bool heading_valid_ = false;
     bool position_valid_ = false;
     bool attitude_valid_ = false;
+    bool ekf_ev_pos_active_ = false;
+    bool ekf_opt_flow_active_ = false;
+    bool ekf_rng_hgt_active_ = false;
 
     // Tag tracking state
     bool tag_visible_ = false;
@@ -89,8 +94,11 @@ private:
     std::unordered_map<int, int> stale_counts_;
     uint64_t tf_timestamp_us_ = 0;
 
-    // Origin offset and image-derived heading
+    // Origin lock delay and image-derived heading
     bool origin_locked_ = false;
+    bool first_tag_seen_ = false;
+    std::chrono::steady_clock::time_point first_tag_time_;
+    double origin_lock_delay_ = 5.0;
     double image_yaw_offset_ = 0.0;  // Aligns image yaw with EKF NED frame
     double latest_image_yaw_ = 0.0;  // Yaw from tag corners in image (2D, no gimbal lock)
     bool image_yaw_valid_ = false;
