@@ -18,6 +18,8 @@ AprilTagOdometry::AprilTagOdometry(const rclcpp::NodeOptions & options)
     this->declare_parameter("filter_length", 5);
     this->declare_parameter("dry_run", false);
     this->declare_parameter("origin_lock_delay", 5.0);
+    this->declare_parameter("use_frd", false);
+    this->declare_parameter("require_ekf_sensors", true);
     this->declare_parameter("tag_map_ids", std::vector<int64_t>{});
     this->declare_parameter("tag_map_x", std::vector<double>{});
     this->declare_parameter("tag_map_y", std::vector<double>{});
@@ -31,6 +33,8 @@ AprilTagOdometry::AprilTagOdometry(const rclcpp::NodeOptions & options)
     filter_length_ = this->get_parameter("filter_length").as_int();
     dry_run_ = this->get_parameter("dry_run").as_bool();
     origin_lock_delay_ = this->get_parameter("origin_lock_delay").as_double();
+    use_frd_ = this->get_parameter("use_frd").as_bool();
+    require_ekf_sensors_ = this->get_parameter("require_ekf_sensors").as_bool();
 
     // Build tag map
     use_tag_map_ = false;
@@ -85,8 +89,12 @@ AprilTagOdometry::AprilTagOdometry(const rclcpp::NodeOptions & options)
     last_detection_time_ = std::chrono::steady_clock::now();
     last_log_time_ = std::chrono::steady_clock::now();
 
-    RCLCPP_INFO(get_logger(), "AprilTag Odometry (C++ fixed-heading NED) initialized");
-    RCLCPP_INFO(get_logger(), "Heading captured once at origin lock — immune to gyro drift");
+    RCLCPP_INFO(get_logger(), "AprilTag Odometry (C++) initialized");
+    if (use_frd_) {
+        RCLCPP_INFO(get_logger(), "FRD mode — body-frame position, PX4 handles NED rotation");
+    } else {
+        RCLCPP_INFO(get_logger(), "NED mode — image-derived heading");
+    }
     if (use_tag_map_) {
         RCLCPP_INFO(get_logger(), "Tag map mode: %zu tags", tag_map_.size());
         for (const auto & [tid, pos] : tag_map_) {
@@ -289,10 +297,11 @@ void AprilTagOdometry::publishOdometry()
 
     if (tag_id != last_visible_tag_id_) {
         if (last_visible_tag_id_ >= 0) {
-            RCLCPP_INFO(get_logger(), "Switched to tag %d", tag_id);
+            RCLCPP_INFO(get_logger(), "Switched to tag %d (reset_counter=%d)", tag_id, reset_counter_ + 1);
             north_buffer_.clear();
             east_buffer_.clear();
             down_buffer_.clear();
+            reset_counter_++;  // Tell PX4 the reference point changed
         }
         last_visible_tag_id_ = tag_id;
         consecutive_readings_ = 0;
@@ -318,20 +327,9 @@ void AprilTagOdometry::publishOdometry()
     double body_right = -tz;
     double body_down = -tx;
 
-    // Use image-based heading derived from tag corner positions (2D, no gimbal lock).
-    // The image_yaw_offset aligns the image angle with the EKF's NED frame.
-    // This heading updates every frame from the tag detection, immune to gyro drift,
-    // and consistent across all tags placed with the same orientation.
-    if (!image_yaw_valid_) {
-        return;  // Need at least one corner-based yaw measurement
-    }
-
-    double heading = latest_image_yaw_ + image_yaw_offset_;
-
-    if (!origin_locked_) {
-        // Wait for optical flow + range sensor to be active in the EKF before locking.
-        // This ensures the EKF is in a healthy state and will accept our vision data.
-        if (!ekf_opt_flow_active_ && !ekf_rng_hgt_active_) {
+    // Wait for EKF sensors before publishing anything
+    if (!origin_locked_ && !use_frd_) {
+        if (require_ekf_sensors_ && !ekf_opt_flow_active_ && !ekf_rng_hgt_active_) {
             if (!first_tag_seen_) {
                 first_tag_seen_ = true;
                 RCLCPP_INFO(get_logger(),
@@ -340,23 +338,23 @@ void AprilTagOdometry::publishOdometry()
             return;
         }
 
-        // Also enforce minimum delay after first tag seen
-        auto now = std::chrono::steady_clock::now();
-        if (first_tag_seen_ && std::chrono::duration<double>(now - first_tag_time_).count() < origin_lock_delay_) {
+        auto now_lock = std::chrono::steady_clock::now();
+        if (first_tag_seen_ && !origin_locked_ &&
+            std::chrono::duration<double>(now_lock - first_tag_time_).count() < origin_lock_delay_) {
             return;
         }
         if (!first_tag_seen_) {
             first_tag_seen_ = true;
-            first_tag_time_ = now;
+            first_tag_time_ = now_lock;
             RCLCPP_INFO(get_logger(),
                 "Tag %d visible, EKF sensors active — waiting %.1fs before origin lock...",
                 tag_id, origin_lock_delay_);
             return;
         }
 
-        // Calibrate: what offset aligns image_yaw with the EKF heading?
+        if (!image_yaw_valid_) return;
+
         image_yaw_offset_ = drone_heading_ - latest_image_yaw_;
-        heading = drone_heading_;  // First frame uses EKF heading exactly
         offset_north_ = drone_x_;
         offset_east_ = drone_y_;
         offset_down_ = drone_z_ - body_down;
@@ -365,51 +363,63 @@ void AprilTagOdometry::publishOdometry()
         east_buffer_.clear();
         down_buffer_.clear();
 
-        double hdg_deg = heading * 180.0 / M_PI;
+        double hdg_deg = drone_heading_ * 180.0 / M_PI;
         if (hdg_deg < 0) hdg_deg += 360.0;
         RCLCPP_INFO(get_logger(),
-            "Origin locked on tag %d — image heading: %.1f° — yaw_offset: %.2f — offset: [%.2f, %.2f, %.2f]",
-            tag_id, hdg_deg, image_yaw_offset_, offset_north_, offset_east_, offset_down_);
+            "Origin locked on tag %d — heading: %.1f° — offset: [%.2f, %.2f, %.2f]",
+            tag_id, hdg_deg, offset_north_, offset_east_, offset_down_);
     }
 
-    double cos_h = std::cos(heading);
-    double sin_h = std::sin(heading);
-    double tag_rel_north = body_forward * cos_h - body_right * sin_h;
-    double tag_rel_east = body_forward * sin_h + body_right * cos_h;
+    double pos_x, pos_y, pos_z;
+    uint8_t pose_frame;
 
-    double north_raw, east_raw, down_raw;
-
-    if (use_tag_map_) {
-        auto & [tag_world_north, tag_world_east] = tag_map_[tag_id];
-        north_raw = tag_world_north + tag_rel_north + offset_north_;
-        east_raw = tag_world_east + tag_rel_east + offset_east_;
-        down_raw = body_down + offset_down_;
+    if (use_frd_) {
+        // FRD mode: publish body-frame position directly.
+        // No heading needed — PX4 handles the NED rotation internally.
+        pos_x = body_forward;
+        pos_y = body_right;
+        pos_z = body_down;
+        pose_frame = px4_msgs::msg::VehicleOdometry::POSE_FRAME_FRD;
     } else {
-        north_raw = tag_rel_north + offset_north_;
-        east_raw = tag_rel_east + offset_east_;
-        down_raw = body_down + offset_down_;
+        // NED mode: rotate body frame to NED using image-derived heading
+        double heading = latest_image_yaw_ + image_yaw_offset_;
+        double cos_h = std::cos(heading);
+        double sin_h = std::sin(heading);
+        double tag_rel_north = body_forward * cos_h - body_right * sin_h;
+        double tag_rel_east = body_forward * sin_h + body_right * cos_h;
+
+        if (use_tag_map_) {
+            auto & [tag_world_north, tag_world_east] = tag_map_[tag_id];
+            pos_x = tag_world_north + tag_rel_north + offset_north_;
+            pos_y = tag_world_east + tag_rel_east + offset_east_;
+        } else {
+            pos_x = tag_rel_north + offset_north_;
+            pos_y = tag_rel_east + offset_east_;
+        }
+        pos_z = body_down + offset_down_;
+        pose_frame = px4_msgs::msg::VehicleOdometry::POSE_FRAME_NED;
     }
 
     // Moving average filter
-    north_buffer_.push_back(north_raw);
-    east_buffer_.push_back(east_raw);
-    down_buffer_.push_back(down_raw);
+    north_buffer_.push_back(pos_x);
+    east_buffer_.push_back(pos_y);
+    down_buffer_.push_back(pos_z);
     while (static_cast<int>(north_buffer_.size()) > filter_length_) {
         north_buffer_.pop_front();
         east_buffer_.pop_front();
         down_buffer_.pop_front();
     }
 
-    double north = std::accumulate(north_buffer_.begin(), north_buffer_.end(), 0.0) / north_buffer_.size();
-    double east = std::accumulate(east_buffer_.begin(), east_buffer_.end(), 0.0) / east_buffer_.size();
-    double down = std::accumulate(down_buffer_.begin(), down_buffer_.end(), 0.0) / down_buffer_.size();
+    double avg_x = std::accumulate(north_buffer_.begin(), north_buffer_.end(), 0.0) / north_buffer_.size();
+    double avg_y = std::accumulate(east_buffer_.begin(), east_buffer_.end(), 0.0) / east_buffer_.size();
+    double avg_z = std::accumulate(down_buffer_.begin(), down_buffer_.end(), 0.0) / down_buffer_.size();
 
-    // Build message in NED frame
+    // Build message
     auto msg = px4_msgs::msg::VehicleOdometry();
     msg.timestamp = tf_timestamp_us_;
     msg.timestamp_sample = tf_timestamp_us_;
-    msg.pose_frame = px4_msgs::msg::VehicleOdometry::POSE_FRAME_NED;
-    msg.position = {static_cast<float>(north), static_cast<float>(east), static_cast<float>(down)};
+    msg.pose_frame = pose_frame;
+    msg.position = {static_cast<float>(avg_x), static_cast<float>(avg_y), static_cast<float>(avg_z)};
 
     constexpr float nan = std::numeric_limits<float>::quiet_NaN();
     msg.q = {nan, nan, nan, nan};
@@ -427,6 +437,7 @@ void AprilTagOdometry::publishOdometry()
         static_cast<float>(orientation_variance_[2])
     };
     msg.velocity_variance = {nan, nan, nan};
+    msg.reset_counter = reset_counter_;
     msg.quality = 100;
 
     if (!dry_run_) {
@@ -436,11 +447,17 @@ void AprilTagOdometry::publishOdometry()
     // Log periodically
     auto now = std::chrono::steady_clock::now();
     if (std::chrono::duration<double>(now - last_log_time_).count() > 1.0) {
-        double hdg_deg = heading * 180.0 / M_PI;
-        if (hdg_deg < 0) hdg_deg += 360.0;
-        RCLCPP_INFO(get_logger(),
-            "Tag %d | Body: [%.2f, %.2f] | NED: [%.2f, %.2f] | ImgHdg: %.0f°",
-            tag_id, body_forward, body_right, north, east, hdg_deg);
+        if (use_frd_) {
+            RCLCPP_INFO(get_logger(),
+                "Tag %d | FRD: [%.2f, %.2f, %.2f]",
+                tag_id, avg_x, avg_y, avg_z);
+        } else {
+            double hdg_deg = (latest_image_yaw_ + image_yaw_offset_) * 180.0 / M_PI;
+            if (hdg_deg < 0) hdg_deg += 360.0;
+            RCLCPP_INFO(get_logger(),
+                "Tag %d | Body: [%.2f, %.2f] | NED: [%.2f, %.2f] | ImgHdg: %.0f°",
+                tag_id, body_forward, body_right, avg_x, avg_y, hdg_deg);
+        }
         last_log_time_ = now;
     }
 }

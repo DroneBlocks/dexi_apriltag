@@ -47,6 +47,8 @@ private:
     std::vector<double> orientation_variance_;
     int filter_length_;
     bool dry_run_;
+    bool use_frd_;
+    bool require_ekf_sensors_;
 
     // Tag map
     std::unordered_map<int, std::pair<double, double>> tag_map_;
@@ -88,6 +90,7 @@ private:
 
     // Tag switch hysteresis
     int tag_miss_count_ = 0;
+    uint8_t reset_counter_ = 0;
 
     // Stale detection
     std::unordered_map<int, double> tf_stamps_;
