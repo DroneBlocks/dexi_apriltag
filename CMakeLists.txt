@@ -73,6 +73,7 @@ install(PROGRAMS
   scripts/apriltag_odometry.py
   scripts/precision_landing.py
   scripts/corridor_navigation.py
+  scripts/tag_yaw_track.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
