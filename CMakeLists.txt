@@ -72,7 +72,7 @@ install(DIRECTORY
 install(PROGRAMS
   scripts/apriltag_odometry.py
   scripts/precision_landing.py
-  scripts/tag_navigate_and_land.py
+  scripts/corridor_navigation.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
