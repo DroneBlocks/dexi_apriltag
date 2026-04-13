@@ -293,7 +293,7 @@ void AprilTagOdometry::publishOdometry()
 
     int tag_id = result.tag_id;
     double tx = result.tx, ty = result.ty, tz = result.tz;
-    double tag_yaw = result.yaw;
+    // result.yaw is unused since we switched to image-based heading (see detectionCallback)
 
     if (tag_id != last_visible_tag_id_) {
         if (last_visible_tag_id_ >= 0) {
