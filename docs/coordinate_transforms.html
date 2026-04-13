@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AprilTag Coordinate Transforms — DEXI</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --panel-light: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #3b82f6;
+    --measured: #ef4444;
+    --rotation: #3b82f6;
+    --world: #22c55e;
+    --body: #f59e0b;
+    --camera: #a855f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    padding: 2rem;
+    min-height: 100vh;
+  }
+  .container {
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.75rem;
+    margin-bottom: 0.5rem;
+  }
+  .subtitle {
+    color: var(--muted);
+    margin-bottom: 2rem;
+  }
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .scene-panel, .info-panel {
+    background: var(--panel);
+    border-radius: 0.5rem;
+    padding: 1.5rem;
+  }
+  .scene-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .scene-panel svg {
+    width: 100%;
+    max-width: 580px;
+    height: auto;
+  }
+  .info-panel h2 {
+    font-size: 1.25rem;
+    margin-bottom: 0.75rem;
+    color: var(--accent);
+  }
+  .info-panel p {
+    line-height: 1.6;
+    color: var(--text);
+    margin-bottom: 0.75rem;
+  }
+  .info-panel .math {
+    background: #0a1120;
+    border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem;
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 0.875rem;
+    margin: 0.75rem 0;
+    border-radius: 0.25rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .info-panel .callout {
+    background: rgba(239, 68, 68, 0.1);
+    border-left: 3px solid var(--measured);
+    padding: 0.75rem 1rem;
+    margin: 0.75rem 0;
+    font-size: 0.9rem;
+  }
+  .info-panel .callout.good {
+    background: rgba(34, 197, 94, 0.1);
+    border-left-color: var(--world);
+  }
+  .legend {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1rem;
+    flex-wrap: wrap;
+    font-size: 0.8125rem;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+  }
+  .controls {
+    background: var(--panel);
+    border-radius: 0.5rem;
+    padding: 1rem 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 0.625rem 1.25rem;
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  button:hover:not(:disabled) { background: #2563eb; }
+  button:disabled { background: #475569; cursor: not-allowed; }
+  .step-dots {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .step-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--panel-light);
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .step-dot.active {
+    background: var(--accent);
+    transform: scale(1.3);
+  }
+  .step-dot.visited {
+    background: var(--world);
+  }
+  .scene-control {
+    width: 100%;
+    max-width: 580px;
+    background: #0a1120;
+    border: 1px solid var(--panel-light);
+    border-radius: 0.375rem;
+    padding: 0.75rem 1rem;
+    margin-top: 1rem;
+    display: none;
+  }
+  .scene-control.visible { display: block; }
+  .scene-control label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    font-size: 0.875rem;
+  }
+  .scene-control label span {
+    color: var(--accent);
+    font-family: 'SF Mono', Monaco, monospace;
+    float: right;
+  }
+  .scene-control input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .scene-control-hint {
+    color: var(--muted);
+    font-size: 0.75rem;
+    margin-top: 0.5rem;
+  }
+  .heading-error-display {
+    font-family: 'SF Mono', Monaco, monospace;
+    color: var(--muted);
+  }
+  .tooltip {
+    position: absolute;
+    background: #0a1120;
+    color: var(--text);
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.375rem;
+    font-size: 0.8125rem;
+    pointer-events: none;
+    border: 1px solid var(--panel-light);
+    max-width: 220px;
+    line-height: 1.4;
+    display: none;
+    z-index: 100;
+  }
+  .hoverable { cursor: pointer; }
+  .hoverable:hover { opacity: 0.7; }
+
+  /* Transitions */
+  .fade { transition: opacity 0.4s; }
+  .hidden { opacity: 0; }
+
+  @media (max-width: 900px) {
+    .main { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>How a Drone Knows Where It Is</h1>
+  <p class="subtitle">Using a downward camera and AprilTag markers to figure out your position in a room — an interactive walkthrough.</p>
+
+  <div class="main">
+    <div class="scene-panel">
+      <svg id="scene" viewBox="0 0 580 460"></svg>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background: var(--measured)"></div>Measured</div>
+        <div class="legend-item"><div class="legend-dot" style="background: var(--camera)"></div>Camera</div>
+        <div class="legend-item"><div class="legend-dot" style="background: var(--body)"></div>Body</div>
+        <div class="legend-item"><div class="legend-dot" style="background: var(--rotation)"></div>Rotation</div>
+        <div class="legend-item"><div class="legend-dot" style="background: var(--world)"></div>World / NED</div>
+      </div>
+
+      <!-- Scene-local interactive controls (shown per step) -->
+      <div class="scene-control" id="drone-slider-panel">
+        <label for="drone-slider">Move drone: <span id="drone-slider-value">+0.00m</span></label>
+        <input type="range" id="drone-slider" min="-0.3" max="0.3" value="0" step="0.01">
+        <p class="scene-control-hint">Slide <strong>left</strong> to move the drone closer to the tag, or <strong>right</strong> to move it farther away. Notice how <em>both</em> the "forward" and "right" values update — that's because moving diagonally changes both axes of the drone's own point of view.</p>
+      </div>
+
+      <div class="scene-control" id="heading-slider-panel">
+        <label for="heading-slider">Heading error: <span id="heading-error-value">0°</span></label>
+        <input type="range" id="heading-slider" min="-30" max="30" value="0" step="1">
+        <div class="heading-error-display" id="heading-error-display" style="font-size: 0.875rem; margin-top: 0.5rem;">Position error: <span id="error-pos">0.00m, 0.00m</span></div>
+        <p class="scene-control-hint">Watch the blue outline drift as heading error grows.</p>
+      </div>
+    </div>
+
+    <div class="info-panel" id="info-panel">
+      <h2 id="step-title"></h2>
+      <div id="step-body"></div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button id="prev-btn">← Previous</button>
+    <div class="step-dots" id="step-dots"></div>
+    <button id="next-btn">Next →</button>
+  </div>
+
+
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script>
+// ============================================================
+// Steps: each step describes the scene state and the info text
+// ============================================================
+const steps = [
+  {
+    title: "1. The problem: where am I?",
+    body: `
+      <p>A drone is flying indoors with no GPS. Its goal is simple: <strong>know where it is.</strong> Specifically, it needs to answer questions like "how far forward have I flown from my takeoff spot?"</p>
+      <p>Indoor drones measure position relative to an <strong>origin</strong> — a fixed reference point that everything is compared against. The origin is just wherever the drone took off from. "Forward," "right," and "up" are set by whichever direction the drone happened to be facing at takeoff. It's arbitrary, but as long as we're consistent, the numbers make sense.</p>
+      <p>To help the drone locate itself, we put printed AprilTag markers on the floor at known positions and point a camera straight down at them. If the drone sees a tag and knows which tag it is, it can work backward to figure out its own position.</p>
+      <p>The hard part is translating between different <strong>points of view</strong>. The camera sees the world from its own angle ("the tag is a little to my left"). The drone has its own sense of forward and right. The room has a fixed set of directions that never change. These different points of view have a name in robotics: <strong>reference frames</strong>.</p>
+      <p><strong>Analogy:</strong> you're in a moving car. A fly buzzes inside the car. From your seat, the fly is "a foot in front of me." From a person on the sidewalk, the fly is "whooshing past at 60 mph." Both are true — they're just measured from different reference frames. Same object, different points of view.</p>
+      <p>The drone has to juggle three reference frames: the <span style="color: var(--camera)">camera</span>, the <span style="color: var(--body)">drone body</span>, and the <span style="color: var(--world)">room</span>. This walkthrough shows how to go from "what the camera sees" to "where I am in the room."</p>
+      <p style="color: var(--muted);">Click Next to begin. Use arrow keys or the dots at the bottom to navigate.</p>
+    `,
+    show: { drone: true, tag: true, camera_cone: true, camera_axes: false, body_axes: false, world_axes: true, measurement: false, rotation_arrow: false, tag_world_label: false }
+  },
+  {
+    title: "2. What the camera sees",
+    body: `
+      <p>The camera takes a picture of the floor. It finds the AprilTag's corners in the image and — because we told the drone ahead of time how big the real tag is — it can calculate how far away that tag must be.</p>
+      <p>The result is a 3D measurement: <strong>the red arrow</strong> in the diagram, labeled "tag offset." It points from the camera to the tag and says how far and in which direction.</p>
+      <p>That arrow is accurate to within a few centimeters. But notice what it <em>doesn't</em> tell us: <strong>where the drone is in the room.</strong> It only tells us where the tag is as seen from the drone. Knowing "the tag is 2 meters away over there" doesn't tell us the drone's position — we'd also need to know where the tag itself is on the floor. We'll get to that in a few steps.</p>
+      <p>There's also this catch: if the drone turns, the camera numbers change — because "left" from the camera's point of view depends on which way the camera is pointing. We need to convert the raw measurement into something more useful before we can do anything with it.</p>
+    `,
+    show: { drone: true, tag: true, camera_cone: true, camera_axes: true, body_axes: false, world_axes: true, measurement: true, rotation_arrow: false, tag_world_label: false }
+  },
+  {
+    title: "3. Translating to the drone's point of view",
+    body: `
+      <p>The camera is bolted to the drone, pointing straight down. Since the camera never moves relative to the drone, we can do a simple, one-time conversion from "what the camera sees" into "what the drone sees" — meaning <em>forward</em>, <em>right</em>, and <em>down</em> from the drone itself.</p>
+      <p>Look at the diagram. The drone's orange <strong>fwd</strong> arrow points up and to the right — that's the direction the drone is facing. The tag sits down and to the left. So from the drone's point of view, the tag is <strong>behind</strong> it and slightly to the <strong>left</strong>, and (of course) <strong>below</strong>:</p>
+      <div class="math" id="step3-math">Tag offset from drone:
+  forward: -0.30m   (negative = behind)
+  right:   -0.05m   (negative = to the left)
+  down:     0.50m   (positive = below the drone)</div>
+      <p><strong>Try it:</strong> use the slider below to move the drone closer to or farther from the tag. Watch both the "forward" and "right" numbers change. Since the drone moves diagonally, it's making progress on both of its own axes at once. Altitude stays constant because we're looking top-down.</p>
+      <p>We still don't know where the drone is in the room. But we do have a clean statement: <em>"the tag is this far forward, right, and down from me."</em> Next we have to turn that into room coordinates.</p>
+    `,
+    show: { drone: true, tag: true, camera_cone: true, camera_axes: true, body_axes: true, world_axes: true, measurement: true, rotation_arrow: false, tag_world_label: false }
+  },
+  {
+    title: "4. Translating to the room's point of view",
+    body: `
+      <p>"Forward" and "right" change every time the drone turns. But a room has fixed directions — <strong>North</strong> is always North, regardless of how the drone is facing. If we want to describe a position in the room, we need directions that don't rotate with the drone.</p>
+      <p>To translate from "drone's point of view" into "room's point of view," we need one number: the drone's <strong>heading</strong> — the compass direction it's currently facing. If the drone points North, its "forward" equals the room's "North." If the drone points East, its "forward" equals the room's "East." Everything in between is a mix of both, computed with a little trigonometry:</p>
+      <div class="math">north = forward·cos(heading) − right·sin(heading)
+east  = forward·sin(heading) + right·cos(heading)</div>
+      <p>After this step, we know where the tag is in the room relative to the drone — for example, "the tag is 0.3 meters south and 0.1 meters east of me." We're almost there.</p>
+      <div class="callout">
+        <strong>The catch:</strong> all of this depends on knowing the heading <em>accurately</em>. Indoors without GPS, heading comes from a gyroscope that drifts over time — and even a few degrees of drift turns into a real position error. We'll see exactly how bad this gets in step 7.
+      </div>
+    `,
+    show: { drone: true, tag: true, camera_cone: false, camera_axes: false, body_axes: true, world_axes: true, measurement: true, rotation_arrow: true, tag_world_label: false }
+  },
+  {
+    title: "5. Where is the tag in the room?",
+    body: `
+      <p>To find the drone's own position, we need one more piece of information: <strong>where the tag itself is in the room</strong>. The drone can't look at a tag and magically know where it's been placed — we have to tell it ahead of time.</p>
+      <p>Before flying, we measure the tag's real-world position and save it. For this walkthrough, let's say we placed one tag right at the origin — the same spot where the drone takes off:</p>
+      <div class="math">Tag 0 is at position (0, 0)
+
+  0.0 meters forward of the origin
+  0.0 meters to the right of the origin</div>
+      <p>That's it. Now the drone has everything it needs: it knows where the tag is in the room, and it knows where the tag is relative to itself. The last piece is some simple subtraction.</p>
+      <p class="scene-control-hint" style="color: var(--muted); margin-top: 0.75rem;">In real flights you'd usually have several tags at known positions so the drone always has one in view. The math works the same way — just one tag is enough to learn the concept.</p>
+    `,
+    show: { drone: true, tag: true, camera_cone: false, camera_axes: false, body_axes: false, world_axes: true, measurement: true, rotation_arrow: true, tag_world_label: true }
+  },
+  {
+    title: "6. Where is the drone?",
+    body: `
+      <p>Now we have everything we need:</p>
+      <ul style="margin-left: 1.25rem; line-height: 1.7; margin-bottom: 0.75rem;">
+        <li><strong>Where the tag is in the room</strong> — at the origin <code>(0, 0)</code>.</li>
+        <li><strong>Where the tag is relative to the drone</strong> — the measurement from steps 2–4, now expressed in room directions (north and east).</li>
+      </ul>
+      <p>If you know where something is, and you know where it is <em>relative to you</em>, you can work backward to figure out where you are. It's like being told "the coffee shop is at 5th and Main, and from where you're standing it's two blocks north." You subtract those two blocks from the coffee shop's location to find your own.</p>
+      <div class="math">drone_position = tag_position − tag_offset (in room directions)</div>
+      <p><strong>Quick example.</strong> Suppose the camera (after translating to room directions) says the tag is 0.30m south of the drone and 0.10m to its west. The tag sits at the origin <code>(0, 0)</code>. Then:</p>
+      <div class="math">drone_position = (0, 0) − (−0.30, −0.10)
+               = (0.30, +0.10)</div>
+      <p>The drone is 0.30m forward of the origin and 0.10m to the east of it — matching where it sits in the diagram. Position solved.</p>
+      <p>The drone hands this position to the flight controller, which combines it with other sensors (optical flow, altitude sensor) to keep a clean picture of where it is. The drone can now hover, navigate, and hold position without GPS.</p>
+      <div class="callout good">
+        <strong>This whole chain works in simulation.</strong> In the next step we'll see the sneaky problem that shows up on real hardware.
+      </div>
+    `,
+    show: { drone: true, tag: true, camera_cone: false, camera_axes: false, body_axes: false, world_axes: true, measurement: false, rotation_arrow: false, tag_world_label: true, drone_ned_label: true }
+  },
+  {
+    title: "7. Why heading errors hurt positioning",
+    body: `
+      <p>Remember the warning from step 4? Heading comes from a gyroscope that drifts over time. Here's why a few degrees of error causes real problems.</p>
+      <p>To convert from the drone's point of view into the room's point of view, we rotate the measurement by the drone's heading. If the heading is wrong, the rotation is wrong, and the computed position drifts from the truth.</p>
+      <p><strong>Try it:</strong> drag the slider below the diagram to introduce a heading error. The solid drone is where it actually is; the blue outline is where the wrong heading says it is. Watch what happens as you twist the slider.</p>
+      <div class="callout">
+        <strong>The error grows with distance.</strong> Look at the numbers under the slider — the position error is tiny when the tag is directly below the drone, but it grows the farther the tag is from directly underneath. A small angle and a long arm add up to a big gap at the end.
+      </div>
+      <p>This is why indoor positioning is tricky. The camera and the code are doing their jobs fine. It's the bad heading being multiplied through the trigonometry that creates the drift. Every degree of heading error becomes a position error that you can see.</p>
+    `,
+    show: { drone: true, tag: true, camera_cone: false, camera_axes: false, body_axes: false, world_axes: true, measurement: true, rotation_arrow: true, tag_world_label: true, drone_ned_label: true, heading_error: true }
+  },
+  {
+    title: "8. A smarter way to position the drone",
+    body: `
+      <p>If converting to room coordinates is what causes the heading problem, what if we just... don't do it? Instead of rotating the measurement ourselves, we can hand the raw "drone's point of view" numbers directly to the flight controller and let it figure out the rest.</p>
+      <div class="math">"The tag is 0.30m in front of me,
+ 0.00m to my right, 1.00m below me."</div>
+      <p>The flight controller has more information than our vision code does. It has the gyroscope, the optical flow sensor, the altitude sensor, and the math that fuses them all together. When it receives a tag measurement in the drone's own point of view, it can cross-check against everything else it knows and produce a position estimate that's consistent with all of the sensors.</p>
+      <p>Our vision code, on the other hand, only knows what the flight controller told it about heading — so if the heading is wrong, we'd just multiply that error into the position. Better to skip the rotation on our end and let the system with the best view of the truth handle it.</p>
+      <div class="callout good">
+        <strong>The big idea:</strong> when translating between reference frames, whoever has the best view of the truth should do the translating. For heading, that's the flight controller — not our vision code. Letting the right system handle the right job is the difference between a drone that drifts and one that holds position.
+      </div>
+      <p>And that's the walkthrough. You now understand how a drone figures out where it is using a downward camera and a single AprilTag — and why even a small heading error can cause big problems indoors. With more than one tag, some clever handoff logic, and this same math repeated, the drone can fly entire corridors autonomously.</p>
+    `,
+    show: { drone: true, tag: true, camera_cone: false, camera_axes: false, body_axes: true, world_axes: false, measurement: true, rotation_arrow: false, tag_world_label: false, drone_ned_label: false, frd_label: true }
+  }
+];
+
+// ============================================================
+// SVG Scene — top-down view
+// ============================================================
+const CX = 290, CY = 230;  // canvas center
+const DX = CX + 90, DY = CY - 90;  // drone default position (upper-right)
+const TX = CX - 100, TY = CY + 70;  // tag position (lower-left, well-separated)
+const PX_PER_M = 200;  // pixel-to-meter scale for the slider
+
+// Default body-frame offset values (at slider = 0)
+const DEFAULT_FWD = -0.30;
+const DEFAULT_RIGHT = -0.05;
+const DEFAULT_DOWN = 0.50;
+
+// Drone forward direction in screen coordinates (up-right in top-down view)
+const FWD_SCREEN_X = Math.SQRT1_2;   // +x = east on screen
+const FWD_SCREEN_Y = -Math.SQRT1_2;  // -y = north on screen
+
+// Live-updateable refs
+const refs = {};
+
+function svgEl(tag, attrs = {}, children = []) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    el.setAttribute(k, v);
+  }
+  for (const child of children) el.appendChild(child);
+  return el;
+}
+
+function buildScene() {
+  const svg = document.getElementById('scene');
+  svg.innerHTML = '';
+
+  // Background grid (represents the floor)
+  const bg = svgEl('rect', { x: 0, y: 0, width: 580, height: 460, fill: '#0a1120' });
+  svg.appendChild(bg);
+  for (let i = 0; i < 12; i++) {
+    svg.appendChild(svgEl('line', { x1: i * 50, y1: 0, x2: i * 50, y2: 460, stroke: '#1e293b', 'stroke-width': 1 }));
+    svg.appendChild(svgEl('line', { x1: 0, y1: i * 50, x2: 580, y2: i * 50, stroke: '#1e293b', 'stroke-width': 1 }));
+  }
+
+  // World axes (top-right corner) — North points UP on screen (bird's-eye view)
+  const worldAxes = svgEl('g', { id: 'world-axes' });
+  // East arrow (to the right)
+  worldAxes.appendChild(svgEl('line', { x1: 500, y1: 90, x2: 550, y2: 90, stroke: 'var(--world)', 'stroke-width': 2, 'marker-end': 'url(#arrow-green)' }));
+  // North arrow (upward on screen)
+  worldAxes.appendChild(svgEl('line', { x1: 500, y1: 90, x2: 500, y2: 40, stroke: 'var(--world)', 'stroke-width': 2, 'marker-end': 'url(#arrow-green)' }));
+  const eastLabel = svgEl('text', { x: 555, y: 95, fill: 'var(--world)', 'font-size': 12, 'font-family': 'monospace' });
+  eastLabel.textContent = 'E';
+  const northLabel = svgEl('text', { x: 488, y: 32, fill: 'var(--world)', 'font-size': 12, 'font-family': 'monospace' });
+  northLabel.textContent = 'N';
+  const worldLabel = svgEl('text', { x: 470, y: 115, fill: 'var(--world)', 'font-size': 11, 'font-family': 'monospace' });
+  worldLabel.textContent = 'WORLD (NED)';
+  const downLabel = svgEl('text', { x: 470, y: 128, fill: 'var(--world)', 'font-size': 9, 'font-family': 'monospace', opacity: 0.7 });
+  downLabel.textContent = '(Down = into screen)';
+  worldAxes.appendChild(eastLabel);
+  worldAxes.appendChild(northLabel);
+  worldAxes.appendChild(worldLabel);
+  worldAxes.appendChild(downLabel);
+  svg.appendChild(worldAxes);
+
+  // Arrow markers
+  const defs = svgEl('defs');
+  for (const [id, color] of [['arrow-red', '#ef4444'], ['arrow-blue', '#3b82f6'], ['arrow-green', '#22c55e'], ['arrow-orange', '#f59e0b'], ['arrow-purple', '#a855f7']]) {
+    const marker = svgEl('marker', { id, markerWidth: 10, markerHeight: 10, refX: 8, refY: 3, orient: 'auto' });
+    marker.appendChild(svgEl('path', { d: 'M0,0 L0,6 L9,3 z', fill: color }));
+    defs.appendChild(marker);
+  }
+  svg.appendChild(defs);
+
+  // Tag (square on floor)
+  const tagGroup = svgEl('g', { id: 'tag', class: 'hoverable' });
+  tagGroup.setAttribute('data-tooltip', 'AprilTag on the floor. Known size, known pattern. The camera detects its corners and computes 3D pose using camera intrinsics.');
+  tagGroup.appendChild(svgEl('rect', { x: TX - 20, y: TY - 20, width: 40, height: 40, fill: 'white', stroke: '#64748b', 'stroke-width': 2 }));
+  // Fake apriltag pattern
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      if ((i + j) % 2 === 0 && i > 0 && j > 0 && i < 3 && j < 3) {
+        tagGroup.appendChild(svgEl('rect', { x: TX - 20 + i * 10, y: TY - 20 + j * 10, width: 10, height: 10, fill: 'black' }));
+      }
+    }
+  }
+  const tagLabel = svgEl('text', { x: TX, y: TY + 40, fill: '#94a3b8', 'font-size': 11, 'text-anchor': 'middle', 'font-family': 'monospace' });
+  tagLabel.textContent = 'Tag 0';
+  tagGroup.appendChild(tagLabel);
+  svg.appendChild(tagGroup);
+
+  // Tag world label
+  const tagWorldLabel = svgEl('g', { id: 'tag-world-label' });
+  const bg2 = svgEl('rect', { x: TX - 60, y: TY - 60, width: 120, height: 26, fill: 'rgba(34,197,94,0.15)', stroke: 'var(--world)', 'stroke-width': 1, rx: 4 });
+  const txt = svgEl('text', { x: TX, y: TY - 43, fill: 'var(--world)', 'font-size': 11, 'text-anchor': 'middle', 'font-family': 'monospace' });
+  txt.textContent = 'tag_world: (0, 0)';
+  tagWorldLabel.appendChild(bg2);
+  tagWorldLabel.appendChild(txt);
+  svg.appendChild(tagWorldLabel);
+
+  // Drone
+  const droneGroup = svgEl('g', { id: 'drone', class: 'hoverable', transform: `translate(${DX},${DY})` });
+  refs.drone = droneGroup;
+  droneGroup.setAttribute('data-tooltip', 'The drone, viewed from above. The orange arrow points in the direction the drone is facing (its "forward").');
+  // Drone body (circle with cross for prop arms)
+  droneGroup.appendChild(svgEl('circle', { cx: 0, cy: 0, r: 18, fill: '#334155', stroke: '#64748b', 'stroke-width': 2 }));
+  droneGroup.appendChild(svgEl('line', { x1: -18, y1: -18, x2: 18, y2: 18, stroke: '#64748b', 'stroke-width': 2 }));
+  droneGroup.appendChild(svgEl('line', { x1: 18, y1: -18, x2: -18, y2: 18, stroke: '#64748b', 'stroke-width': 2 }));
+  // Forward arrow
+  droneGroup.appendChild(svgEl('line', { x1: 0, y1: 0, x2: 45, y2: -45, stroke: 'var(--body)', 'stroke-width': 3, 'marker-end': 'url(#arrow-orange)', id: 'drone-forward' }));
+  const fwdLabel = svgEl('text', { x: 52, y: -48, fill: 'var(--body)', 'font-size': 12, 'font-family': 'monospace', 'font-weight': 'bold' });
+  fwdLabel.textContent = 'fwd';
+  droneGroup.appendChild(fwdLabel);
+  svg.appendChild(droneGroup);
+
+  // Camera cone (FOV) — triangle from drone lens to a footprint around the tag.
+  // In top-down view this is the projection of the pyramid to 2D.
+  // We compute two outer rays perpendicular to the drone-tag line.
+  const camCone = svgEl('g', { id: 'camera-cone' });
+  const dxLine = TX - DX;
+  const dyLine = TY - DY;
+  const lineLen = Math.sqrt(dxLine * dxLine + dyLine * dyLine);
+  // Perpendicular unit vector
+  const perpX = -dyLine / lineLen;
+  const perpY = dxLine / lineLen;
+  const footprintHalfWidth = 70;
+  const fp1x = TX + perpX * footprintHalfWidth;
+  const fp1y = TY + perpY * footprintHalfWidth;
+  const fp2x = TX - perpX * footprintHalfWidth;
+  const fp2y = TY - perpY * footprintHalfWidth;
+  const conePath = svgEl('polygon', {
+    points: `${DX},${DY} ${fp1x},${fp1y} ${fp2x},${fp2y}`,
+    fill: 'rgba(168, 85, 247, 0.08)',
+    stroke: 'var(--camera)',
+    'stroke-width': 1,
+    'stroke-dasharray': '4,4'
+  });
+  refs.conePath = conePath;
+  camCone.appendChild(conePath);
+  svg.appendChild(camCone);
+
+  // Camera axes — placed below-left of the tag so they don't overlap it
+  const camAxes = svgEl('g', { id: 'camera-axes' });
+  const axOx = TX - 70;  // origin of the camera axes
+  const axOy = TY + 55;
+  camAxes.appendChild(svgEl('line', { x1: axOx, y1: axOy, x2: axOx + 45, y2: axOy, stroke: 'var(--camera)', 'stroke-width': 2.5, 'marker-end': 'url(#arrow-purple)' }));
+  camAxes.appendChild(svgEl('line', { x1: axOx, y1: axOy, x2: axOx, y2: axOy + 45, stroke: 'var(--camera)', 'stroke-width': 2.5, 'marker-end': 'url(#arrow-purple)' }));
+  const cxLabel = svgEl('text', { x: axOx + 52, y: axOy + 4, fill: 'var(--camera)', 'font-size': 12, 'font-family': 'monospace', 'font-weight': 'bold' });
+  cxLabel.textContent = 'cx';
+  const cyLabel = svgEl('text', { x: axOx - 4, y: axOy + 62, fill: 'var(--camera)', 'font-size': 12, 'font-family': 'monospace', 'font-weight': 'bold' });
+  cyLabel.textContent = 'cy';
+  const camFrameLabel = svgEl('text', { x: axOx - 8, y: axOy - 8, fill: 'var(--camera)', 'font-size': 10, 'font-family': 'monospace', opacity: 0.8 });
+  camFrameLabel.textContent = 'camera frame';
+  camAxes.appendChild(cxLabel);
+  camAxes.appendChild(cyLabel);
+  camAxes.appendChild(camFrameLabel);
+  svg.appendChild(camAxes);
+
+  // Body axes
+  const bodyAxes = svgEl('g', { id: 'body-axes' });
+  const bodyAxLine1 = svgEl('line', { x1: DX, y1: DY, x2: DX + 35, y2: DY - 35, stroke: 'var(--body)', 'stroke-width': 2, 'marker-end': 'url(#arrow-orange)' });
+  const bodyAxLine2 = svgEl('line', { x1: DX, y1: DY, x2: DX + 35, y2: DY + 35, stroke: 'var(--body)', 'stroke-width': 2, 'marker-end': 'url(#arrow-orange)' });
+  bodyAxes.appendChild(bodyAxLine1);
+  bodyAxes.appendChild(bodyAxLine2);
+  refs.bodyAxLine1 = bodyAxLine1;
+  refs.bodyAxLine2 = bodyAxLine2;
+  svg.appendChild(bodyAxes);
+
+  // Measurement line (red, drone to tag)
+  const measurement = svgEl('g', { id: 'measurement' });
+  const mLine = svgEl('line', {
+    x1: DX, y1: DY, x2: TX, y2: TY,
+    stroke: 'var(--measured)',
+    'stroke-width': 2,
+    'stroke-dasharray': '6,4',
+    'marker-end': 'url(#arrow-red)'
+  });
+  measurement.appendChild(mLine);
+  const mLabel = svgEl('text', { x: (DX + TX) / 2 + 15, y: (DY + TY) / 2 - 8, fill: 'var(--measured)', 'font-size': 12, 'font-family': 'monospace', 'font-weight': 'bold' });
+  mLabel.textContent = 'tag offset';
+  measurement.appendChild(mLabel);
+  refs.mLine = mLine;
+  refs.mLabel = mLabel;
+  svg.appendChild(measurement);
+
+  // Rotation arrow (blue curve)
+  const rotArrow = svgEl('g', { id: 'rotation-arrow' });
+  const rotPath = svgEl('path', {
+    d: `M ${DX - 50} ${DY + 15} Q ${DX - 25} ${DY - 15} ${DX - 50} ${DY - 45}`,
+    fill: 'none',
+    stroke: 'var(--rotation)',
+    'stroke-width': 2,
+    'marker-end': 'url(#arrow-blue)'
+  });
+  const rLabel = svgEl('text', { x: DX - 90, y: DY - 5, fill: 'var(--rotation)', 'font-size': 11, 'font-family': 'monospace' });
+  rLabel.textContent = 'rotate(h)';
+  rotArrow.appendChild(rotPath);
+  rotArrow.appendChild(rLabel);
+  svg.appendChild(rotArrow);
+
+  // Drone position label (green) — placed above-left of the drone, clear of the fwd arrow
+  const droneNedLabel = svgEl('g', { id: 'drone-ned-label' });
+  const bg3 = svgEl('rect', { x: DX - 160, y: DY - 95, width: 160, height: 26, fill: 'rgba(34,197,94,0.15)', stroke: 'var(--world)', 'stroke-width': 1, rx: 4 });
+  const txt3 = svgEl('text', { x: DX - 80, y: DY - 78, fill: 'var(--world)', 'font-size': 11, 'text-anchor': 'middle', 'font-family': 'monospace' });
+  txt3.textContent = 'drone_pos: (0.30, +0.10)';
+  droneNedLabel.appendChild(bg3);
+  droneNedLabel.appendChild(txt3);
+  svg.appendChild(droneNedLabel);
+
+  // FRD label
+  const frdLabel = svgEl('g', { id: 'frd-label' });
+  const bg4 = svgEl('rect', { x: DX - 90, y: DY - 65, width: 180, height: 26, fill: 'rgba(59,130,246,0.15)', stroke: 'var(--rotation)', 'stroke-width': 1, rx: 4 });
+  const txt4 = svgEl('text', { x: DX, y: DY - 48, fill: 'var(--rotation)', 'font-size': 11, 'text-anchor': 'middle', 'font-family': 'monospace' });
+  txt4.textContent = 'FRD: [0.10, 0.00, 0.50]';
+  frdLabel.appendChild(bg4);
+  frdLabel.appendChild(txt4);
+  svg.appendChild(frdLabel);
+
+  // Heading error phantom drone (for step 7)
+  const phantom = svgEl('g', { id: 'phantom-drone', transform: `translate(${DX},${DY})` });
+  phantom.appendChild(svgEl('circle', { cx: 0, cy: 0, r: 18, fill: 'rgba(59,130,246,0.3)', stroke: 'var(--rotation)', 'stroke-width': 2, 'stroke-dasharray': '4,2' }));
+  const pLabel = svgEl('text', { x: 22, y: 4, fill: 'var(--rotation)', 'font-size': 10, 'font-family': 'monospace' });
+  pLabel.textContent = 'where EKF';
+  const pLabel2 = svgEl('text', { x: 22, y: 16, fill: 'var(--rotation)', 'font-size': 10, 'font-family': 'monospace' });
+  pLabel2.textContent = 'thinks I am';
+  phantom.appendChild(pLabel);
+  phantom.appendChild(pLabel2);
+  svg.appendChild(phantom);
+
+  // Set up hover tooltips
+  const tooltip = document.getElementById('tooltip');
+  for (const el of svg.querySelectorAll('[data-tooltip]')) {
+    el.addEventListener('mouseenter', (e) => {
+      tooltip.textContent = el.getAttribute('data-tooltip');
+      tooltip.style.display = 'block';
+    });
+    el.addEventListener('mousemove', (e) => {
+      tooltip.style.left = (e.pageX + 15) + 'px';
+      tooltip.style.top = (e.pageY + 15) + 'px';
+    });
+    el.addEventListener('mouseleave', () => {
+      tooltip.style.display = 'none';
+    });
+  }
+}
+
+// ============================================================
+// Step rendering
+// ============================================================
+let currentStep = 0;
+const visited = new Set([0]);
+
+function renderStep(i) {
+  currentStep = i;
+  visited.add(i);
+  const step = steps[i];
+  document.getElementById('step-title').textContent = step.title;
+  document.getElementById('step-body').innerHTML = step.body;
+
+  // Show/hide scene elements
+  const ids = {
+    drone: 'drone',
+    tag: 'tag',
+    camera_cone: 'camera-cone',
+    camera_axes: 'camera-axes',
+    body_axes: 'body-axes',
+    world_axes: 'world-axes',
+    measurement: 'measurement',
+    rotation_arrow: 'rotation-arrow',
+    tag_world_label: 'tag-world-label',
+    drone_ned_label: 'drone-ned-label',
+    frd_label: 'frd-label',
+  };
+  for (const [key, id] of Object.entries(ids)) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = step.show[key] ? 'inline' : 'none';
+  }
+
+  // Phantom drone visible only in step 7
+  const phantom = document.getElementById('phantom-drone');
+  phantom.style.display = step.show.heading_error ? 'inline' : 'none';
+
+  // Heading slider visible only in step 7
+  const hsp = document.getElementById('heading-slider-panel');
+  if (step.show.heading_error) {
+    hsp.classList.add('visible');
+    updatePhantom();
+  } else {
+    hsp.classList.remove('visible');
+  }
+
+  // Drone-position slider visible only in step 3 (index 2)
+  const dsp = document.getElementById('drone-slider-panel');
+  if (i === 2) {
+    dsp.classList.add('visible');
+  } else {
+    dsp.classList.remove('visible');
+    // Reset drone position when leaving step 3 so other steps show the default layout
+    resetDronePosition();
+  }
+
+  // Update buttons
+  document.getElementById('prev-btn').disabled = i === 0;
+  document.getElementById('next-btn').disabled = i === steps.length - 1;
+
+  // Update dots
+  const dots = document.querySelectorAll('.step-dot');
+  dots.forEach((d, idx) => {
+    d.classList.toggle('active', idx === i);
+    d.classList.toggle('visited', idx !== i && visited.has(idx));
+  });
+}
+
+function buildDots() {
+  const dots = document.getElementById('step-dots');
+  dots.innerHTML = '';
+  for (let i = 0; i < steps.length; i++) {
+    const d = document.createElement('div');
+    d.className = 'step-dot';
+    d.addEventListener('click', () => renderStep(i));
+    dots.appendChild(d);
+  }
+}
+
+// Drone's RIGHT axis in screen coordinates (perpendicular to forward, clockwise in NED top-down)
+const RIGHT_SCREEN_X = -FWD_SCREEN_Y;  // +0.707 (east component)
+const RIGHT_SCREEN_Y =  FWD_SCREEN_X;  // +0.707 (south component, so right is SE on screen)
+
+// Unit vector from default drone position toward the tag (in screen coords)
+const TAG_DIR_RAW_X = TX - DX;
+const TAG_DIR_RAW_Y = TY - DY;
+const TAG_DIR_LEN = Math.sqrt(TAG_DIR_RAW_X * TAG_DIR_RAW_X + TAG_DIR_RAW_Y * TAG_DIR_RAW_Y);
+const TAG_DIR_X = TAG_DIR_RAW_X / TAG_DIR_LEN;
+const TAG_DIR_Y = TAG_DIR_RAW_Y / TAG_DIR_LEN;
+
+// Drone position slider (step 3) → move drone along drone→tag line
+// Positive slider = drone moves toward tag; negative = drone moves away
+function updateDronePosition(moveMeters) {
+  moveMeters = moveMeters || 0;
+  // Screen displacement along the drone→tag line
+  const dxPx = moveMeters * PX_PER_M * TAG_DIR_X;
+  const dyPx = moveMeters * PX_PER_M * TAG_DIR_Y;
+  const newDX = DX + dxPx;
+  const newDY = DY + dyPx;
+
+  // Update drone transform
+  refs.drone.setAttribute('transform', `translate(${newDX},${newDY})`);
+
+  // Update camera cone apex
+  const dxLine = TX - newDX;
+  const dyLine = TY - newDY;
+  const lineLen = Math.sqrt(dxLine * dxLine + dyLine * dyLine);
+  const perpX = -dyLine / lineLen;
+  const perpY = dxLine / lineLen;
+  const footprintHalfWidth = 70;
+  const fp1x = TX + perpX * footprintHalfWidth;
+  const fp1y = TY + perpY * footprintHalfWidth;
+  const fp2x = TX - perpX * footprintHalfWidth;
+  const fp2y = TY - perpY * footprintHalfWidth;
+  refs.conePath.setAttribute('points', `${newDX},${newDY} ${fp1x},${fp1y} ${fp2x},${fp2y}`);
+
+  // Update body axes origin (move with drone)
+  refs.bodyAxLine1.setAttribute('x1', newDX);
+  refs.bodyAxLine1.setAttribute('y1', newDY);
+  refs.bodyAxLine1.setAttribute('x2', newDX + 35);
+  refs.bodyAxLine1.setAttribute('y2', newDY - 35);
+  refs.bodyAxLine2.setAttribute('x1', newDX);
+  refs.bodyAxLine2.setAttribute('y1', newDY);
+  refs.bodyAxLine2.setAttribute('x2', newDX + 35);
+  refs.bodyAxLine2.setAttribute('y2', newDY + 35);
+
+  // Update measurement line (always drone → tag)
+  refs.mLine.setAttribute('x1', newDX);
+  refs.mLine.setAttribute('y1', newDY);
+  refs.mLabel.setAttribute('x', (newDX + TX) / 2 + 15);
+  refs.mLabel.setAttribute('y', (newDY + TY) / 2 - 8);
+
+  // The drone moved along the drone→tag line by moveMeters.
+  // Decompose that motion into the drone's body-frame axes (forward and right).
+  // TAG_DIR is the unit vector (in screen coords) from drone to tag.
+  // Drone's forward axis in screen coords: (FWD_SCREEN_X, FWD_SCREEN_Y)
+  // Drone's right   axis in screen coords: (RIGHT_SCREEN_X, RIGHT_SCREEN_Y)
+  // Projection of the motion onto each axis tells us how much that body component changed.
+  const motionAlongForward = moveMeters * (TAG_DIR_X * FWD_SCREEN_X + TAG_DIR_Y * FWD_SCREEN_Y);
+  const motionAlongRight   = moveMeters * (TAG_DIR_X * RIGHT_SCREEN_X + TAG_DIR_Y * RIGHT_SCREEN_Y);
+
+  // When the drone moves forward by d, the tag appears d less in front (so "forward" value decreases).
+  // Same for right: drone moves right by d → tag appears d less to the right.
+  const newFwd = DEFAULT_FWD - motionAlongForward;
+  const newRight = DEFAULT_RIGHT - motionAlongRight;
+  const mathEl = document.getElementById('step3-math');
+  if (mathEl) {
+    const fwdStr = newFwd.toFixed(2).padStart(5);
+    const rightStr = newRight.toFixed(2).padStart(5);
+    const downStr = DEFAULT_DOWN.toFixed(2).padStart(5);
+    const fwdNote = newFwd < -0.005 ? 'negative = behind' : (newFwd > 0.005 ? 'positive = in front' : 'directly above');
+    const rightNote = newRight < -0.005 ? 'negative = to the left' : (newRight > 0.005 ? 'positive = to the right' : 'directly sideways');
+    mathEl.textContent = `Tag offset from drone:
+  forward: ${fwdStr}m   (${fwdNote})
+  right:   ${rightStr}m   (${rightNote})
+  down:     ${downStr}m   (positive = below the drone)`;
+  }
+
+  // Slider value label — show direction relative to the tag
+  const sliderValEl = document.getElementById('drone-slider-value');
+  if (sliderValEl) {
+    if (Math.abs(moveMeters) < 0.005) {
+      sliderValEl.textContent = 'at start';
+    } else if (moveMeters > 0) {
+      sliderValEl.textContent = moveMeters.toFixed(2) + 'm closer';
+    } else {
+      sliderValEl.textContent = Math.abs(moveMeters).toFixed(2) + 'm farther';
+    }
+  }
+}
+
+function resetDronePosition() {
+  updateDronePosition(0);
+  const slider = document.getElementById('drone-slider');
+  if (slider) slider.value = 0;
+}
+
+// Heading error slider → phantom drone position
+function updatePhantom() {
+  const h = parseFloat(document.getElementById('heading-slider').value);
+  document.getElementById('heading-error-value').textContent = h + '°';
+  // Apply rotation to the computed drone position (relative to tag)
+  const rad = h * Math.PI / 180;
+  const dx = DX - TX;  // drone offset from tag in pixels
+  const dy = DY - TY;
+  // Rotate by h
+  const rdx = dx * Math.cos(rad) - dy * Math.sin(rad);
+  const rdy = dx * Math.sin(rad) + dy * Math.cos(rad);
+  const phantomX = TX + rdx;
+  const phantomY = TY + rdy;
+  document.getElementById('phantom-drone').setAttribute('transform', `translate(${phantomX},${phantomY})`);
+  // Show error position
+  const metersPerPixel = 0.01;  // rough scale
+  const errX = (rdx - dx) * metersPerPixel;
+  const errY = (rdy - dy) * metersPerPixel;
+  document.getElementById('error-pos').textContent = `offset by (${errX.toFixed(2)}m, ${errY.toFixed(2)}m)`;
+}
+
+// ============================================================
+// Init
+// ============================================================
+buildScene();
+buildDots();
+renderStep(0);
+
+document.getElementById('prev-btn').addEventListener('click', () => {
+  if (currentStep > 0) renderStep(currentStep - 1);
+});
+document.getElementById('next-btn').addEventListener('click', () => {
+  if (currentStep < steps.length - 1) renderStep(currentStep + 1);
+});
+document.getElementById('heading-slider').addEventListener('input', updatePhantom);
+document.getElementById('drone-slider').addEventListener('input', (e) => {
+  // Invert: sliding LEFT moves drone closer to tag, RIGHT moves it away
+  updateDronePosition(-parseFloat(e.target.value));
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft' && currentStep > 0) renderStep(currentStep - 1);
+  if (e.key === 'ArrowRight' && currentStep < steps.length - 1) renderStep(currentStep + 1);
+});
+</script>
+</body>
+</html>
