@@ -18,6 +18,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import tf2_ros
 from px4_msgs.msg import VehicleOdometry, VehicleLocalPosition, VehicleAttitude
+from apriltag_msgs.msg import AprilTagDetectionArray
 import time
 import math
 from collections import deque
@@ -30,13 +31,13 @@ class AprilTagOdometry(Node):
         # Parameters
         self.declare_parameter('tag_family', 'tag36h11')
         self.declare_parameter('target_tag_id', 0)
-        self.declare_parameter('publish_rate', 10.0)  # Hz - slower to reduce oscillation
-        self.declare_parameter('position_variance', [2.0, 2.0, 100.0])  # Higher variance - less aggressive corrections
+        self.declare_parameter('publish_rate', 5.0)
+        self.declare_parameter('position_variance', [50.0, 50.0, 100.0])
         self.declare_parameter('orientation_variance', [0.01, 0.01, 0.01])
-        self.declare_parameter('filter_length', 5)  # Moving average filter length (ModalAI default)
-        self.declare_parameter('dry_run', False)  # If true, log but don't publish to EKF2
+        self.declare_parameter('filter_length', 5)
+        self.declare_parameter('dry_run', False)
 
-        # Tag map parameters (empty = single tag mode for backward compatibility)
+        # Tag map parameters
         self.declare_parameter('tag_map_ids', rclpy.Parameter.Type.INTEGER_ARRAY)
         self.declare_parameter('tag_map_x', rclpy.Parameter.Type.DOUBLE_ARRAY)
         self.declare_parameter('tag_map_y', rclpy.Parameter.Type.DOUBLE_ARRAY)
@@ -66,7 +67,7 @@ class AprilTagOdometry(Node):
                 else:
                     self.get_logger().error('Tag map arrays must be the same length')
         except rclpy.exceptions.ParameterUninitializedException:
-            pass  # No tag map provided, single tag mode
+            pass
 
         # QoS for PX4
         px4_qos = QoSProfile(
@@ -88,10 +89,17 @@ class AprilTagOdometry(Node):
             VehicleLocalPosition, '/fmu/out/vehicle_local_position',
             self.local_position_callback, px4_qos)
 
-        # Subscriber for drone attitude (pitch/roll for tilt compensation)
+        # Subscriber for drone attitude
         self.attitude_sub = self.create_subscription(
             VehicleAttitude, '/fmu/out/vehicle_attitude',
             self.attitude_callback, px4_qos)
+
+        # Subscribe to apriltag detections — tells us which tags are visible NOW
+        self.detected_tag_ids = set()
+        self.last_detection_time = 0.0
+        self.detection_sub = self.create_subscription(
+            AprilTagDetectionArray, '/apriltag_detections',
+            self.detection_callback, 10)
 
         # State
         self.drone_heading = 0.0
@@ -106,19 +114,20 @@ class AprilTagOdometry(Node):
         self.tag_visible = False
         self.last_publish_time = None
         self.last_visible_tag_id = None
+        self.current_tag_id = None
+        self.current_tag_distance = float('inf')
+        self.current_tag_lock_time = 0.0  # When current tag was first tracked
+        self.consecutive_readings = 0  # Count of consecutive readings from same tag
+        self._tf_stamps = {}
+        self._stale_counts = {}
 
-        # Origin offset - aligns tag/map frame with EKF2 frame
+        # Origin offset
         self.origin_locked = False
         self.offset_north = 0.0
         self.offset_east = 0.0
         self.offset_down = 0.0
-        # Track EKF2 position to detect frame jumps (e.g., GPS disable)
-        self.last_ekf2_x = None
-        self.last_ekf2_y = None
-        self.last_ekf2_time = None
 
-        # Moving average filter buffers (ModalAI approach)
-        # Filter smooths position estimates to prevent EKF2 discontinuities
+        # Moving average filter buffers
         self.north_buffer = deque(maxlen=self.filter_length)
         self.east_buffer = deque(maxlen=self.filter_length)
         self.down_buffer = deque(maxlen=self.filter_length)
@@ -140,32 +149,35 @@ class AprilTagOdometry(Node):
         else:
             self.get_logger().info(f'Publishing at {self.publish_rate} Hz to /fmu/in/vehicle_visual_odometry')
 
+    def detection_callback(self, msg):
+        """Track which tags are currently detected by apriltag_ros."""
+        now = time.time()
+        if now - self.last_detection_time < 0.1:
+            return  # Throttle to 10Hz max
+        self.detected_tag_ids = {d.id for d in msg.detections}
+        if self.detected_tag_ids:
+            self.last_detection_time = now
+
     def local_position_callback(self, msg):
         """Track drone heading and position for frame alignment."""
         self.drone_heading = msg.heading
-        self.drone_x = msg.x  # North
-        self.drone_y = msg.y  # East
-        self.drone_z = msg.z  # Down
+        self.drone_x = msg.x
+        self.drone_y = msg.y
+        self.drone_z = msg.z
         self.heading_valid = True
         self.position_valid = True
 
     def attitude_callback(self, msg):
         """Track drone attitude for tilt compensation with body-fixed camera."""
-        # PX4 quaternion is [w, x, y, z]
         w, x, y, z = msg.q[0], msg.q[1], msg.q[2], msg.q[3]
-
-        # Extract roll (rotation around X/forward axis)
         sinr_cosp = 2.0 * (w * x + y * z)
         cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
         self.drone_roll = math.atan2(sinr_cosp, cosr_cosp)
-
-        # Extract pitch (rotation around Y/right axis)
         sinp = 2.0 * (w * y - z * x)
         if abs(sinp) >= 1:
             self.drone_pitch = math.copysign(math.pi / 2, sinp)
         else:
             self.drone_pitch = math.asin(sinp)
-
         self.attitude_valid = True
 
     def _lookup_tag_tf(self, tag_id):
@@ -174,7 +186,7 @@ class AprilTagOdometry(Node):
         try:
             transform = self.tf_buffer.lookup_transform(
                 'base_link', tag_frame, rclpy.time.Time(seconds=0),
-                timeout=rclpy.duration.Duration(seconds=0.01))
+                timeout=rclpy.duration.Duration(seconds=0.005))
 
             tx = transform.transform.translation.x
             ty = transform.transform.translation.y
@@ -188,51 +200,63 @@ class AprilTagOdometry(Node):
         """
         Get the best visible AprilTag position from TF.
 
-        In tag map mode: checks all tags in the map, picks the closest.
-        In single tag mode: looks up the single target tag.
+        Only looks up TF for tags that apriltag_ros has recently detected,
+        avoiding blind lookups that waste CPU and fail due to timing.
 
         Returns (success, tag_id, tx, ty, tz, qw, qx, qy, qz)
         """
         if self.use_tag_map:
-            best_tag_id = None
-            best_transform = None
-            best_distance = float('inf')
-
-            for tag_id in self.tag_map:
-                result = self._lookup_tag_tf(tag_id)
-                if result is not None:
-                    transform, distance = result
-                    if distance < best_distance:
-                        best_distance = distance
-                        best_transform = transform
-                        best_tag_id = tag_id
-
-            if best_transform is None:
+            # Only check tags that are both in our map AND recently detected
+            detection_age = time.time() - self.last_detection_time
+            if detection_age > 0.5:
+                # No recent detections
+                self.current_tag_id = None
+                self.current_tag_distance = float('inf')
                 return False, -1, 0, 0, 0, 1, 0, 0, 0
 
+            candidates = self.detected_tag_ids & set(self.tag_map.keys())
+            if not candidates:
+                self.current_tag_id = None
+                self.current_tag_distance = float('inf')
+                return False, -1, 0, 0, 0, 1, 0, 0, 0
+
+            # Tag lock: stay on current tag as long as it's in the detection set.
+            # Only switch when current tag leaves the detection set entirely.
+            if (self.current_tag_id is not None and
+                    self.current_tag_id in candidates):
+                chosen_id = self.current_tag_id
+            else:
+                # Current tag lost from detections — pick lowest ID
+                chosen_id = min(candidates)
+
+            # Look up TF only for the chosen tag
+            result = self._lookup_tag_tf(chosen_id)
+            if result is None:
+                return False, -1, 0, 0, 0, 1, 0, 0, 0
+
+            self.current_tag_id = chosen_id
+            self.current_tag_distance = result[1]
+            best_transform = result[0]
+
             t = best_transform.transform
-            # Store TF timestamp
             self._tf_timestamp_us = int(
                 best_transform.header.stamp.sec * 1e6 +
                 best_transform.header.stamp.nanosec / 1e3)
 
-            # Stale detection
+            # Per-tag stale detection
             tf_stamp = (best_transform.header.stamp.sec +
                         best_transform.header.stamp.nanosec / 1e9)
-            if not hasattr(self, '_last_tf_stamp'):
-                self._last_tf_stamp = tf_stamp
-            elif tf_stamp == self._last_tf_stamp:
-                if not hasattr(self, '_stale_count'):
-                    self._stale_count = 0
-                self._stale_count += 1
-                if self._stale_count > 5:
-                    self.get_logger().debug('TF stale - no new data', throttle_duration_sec=1.0)
+            last_stamp = self._tf_stamps.get(chosen_id, 0)
+            if tf_stamp == last_stamp:
+                self._stale_counts[chosen_id] = self._stale_counts.get(chosen_id, 0) + 1
+                if self._stale_counts[chosen_id] > 5:
+                    self.get_logger().debug(f'TF stale for tag {chosen_id}', throttle_duration_sec=1.0)
                     return False, -1, 0, 0, 0, 1, 0, 0, 0
             else:
-                self._last_tf_stamp = tf_stamp
-                self._stale_count = 0
+                self._tf_stamps[chosen_id] = tf_stamp
+                self._stale_counts[chosen_id] = 0
 
-            return (True, best_tag_id,
+            return (True, chosen_id,
                     t.translation.x, t.translation.y, t.translation.z,
                     t.rotation.w, t.rotation.x, t.rotation.y, t.rotation.z)
 
@@ -243,27 +267,23 @@ class AprilTagOdometry(Node):
                 return False, -1, 0, 0, 0, 1, 0, 0, 0
 
             transform, _ = result
-
-            # Store TF timestamp
             self._tf_timestamp_us = int(
                 transform.header.stamp.sec * 1e6 +
                 transform.header.stamp.nanosec / 1e3)
 
-            # Stale detection
+            # Per-tag stale detection
             tf_stamp = (transform.header.stamp.sec +
                         transform.header.stamp.nanosec / 1e9)
-            if not hasattr(self, '_last_tf_stamp'):
-                self._last_tf_stamp = tf_stamp
-            elif tf_stamp == self._last_tf_stamp:
-                if not hasattr(self, '_stale_count'):
-                    self._stale_count = 0
-                self._stale_count += 1
-                if self._stale_count > 5:
-                    self.get_logger().debug('TF stale - no new data', throttle_duration_sec=1.0)
+            tid = self.target_tag_id
+            last_stamp = self._tf_stamps.get(tid, 0)
+            if tf_stamp == last_stamp:
+                self._stale_counts[tid] = self._stale_counts.get(tid, 0) + 1
+                if self._stale_counts[tid] > 5:
+                    self.get_logger().debug(f'TF stale for tag {tid}', throttle_duration_sec=1.0)
                     return False, -1, 0, 0, 0, 1, 0, 0, 0
             else:
-                self._last_tf_stamp = tf_stamp
-                self._stale_count = 0
+                self._tf_stamps[tid] = tf_stamp
+                self._stale_counts[tid] = 0
 
             t = transform.transform
             return (True, self.target_tag_id,
@@ -283,38 +303,35 @@ class AprilTagOdometry(Node):
                 self.get_logger().info('Tag lost - stopping odometry publishing')
                 self.tag_visible = False
                 self.last_visible_tag_id = None
+                self.consecutive_readings = 0
             return
-
-        if not self.tag_visible:
-            self.get_logger().info(f'Tag {tag_id} detected - starting odometry publishing')
-            self.tag_visible = True
 
         if tag_id != self.last_visible_tag_id:
             if self.last_visible_tag_id is not None:
                 self.get_logger().info(f'Switched to tag {tag_id}')
+                # Flush moving average filter to prevent stale data from old tag
+                self.north_buffer.clear()
+                self.east_buffer.clear()
+                self.down_buffer.clear()
             self.last_visible_tag_id = tag_id
+            self.consecutive_readings = 0
+
+        self.consecutive_readings += 1
+
+        # Stability gate: don't publish until tag has been stable for 5 readings
+        if self.consecutive_readings < 5:
+            if self.consecutive_readings == 1:
+                self.get_logger().info(f'Tag {tag_id} detected - stabilizing...')
+            return
+
+        if not self.tag_visible:
+            self.get_logger().info(f'Tag {tag_id} stable - starting odometry publishing')
+            self.tag_visible = True
 
         # Transform from TF frame to body frame
-        # TF X = altitude (down), TF Y = south, TF Z = west
         body_forward = -ty
         body_right = -tz
         body_down = -tx
-
-        # Detect EKF2 frame jumps
-        now = time.time()
-        if self.origin_locked and self.last_ekf2_x is not None:
-            dt = now - self.last_ekf2_time
-            if dt > 0 and dt < 1.0:
-                dx = abs(self.drone_x - self.last_ekf2_x)
-                dy = abs(self.drone_y - self.last_ekf2_y)
-                velocity = math.sqrt(dx * dx + dy * dy) / dt
-                if velocity > 5.0 and (dx > 0.5 or dy > 0.5):
-                    self.get_logger().warn(
-                        f'EKF2 frame jump detected (moved {dx:.2f}, {dy:.2f} in {dt:.3f}s) - re-locking origin')
-                    self.origin_locked = False
-        self.last_ekf2_x = self.drone_x
-        self.last_ekf2_y = self.drone_y
-        self.last_ekf2_time = now
 
         # Calculate body-to-NED transform using current heading
         cos_h = math.cos(self.drone_heading)
@@ -323,12 +340,10 @@ class AprilTagOdometry(Node):
         tag_rel_east = body_forward * sin_h + body_right * cos_h
 
         if self.use_tag_map:
-            # Tag map mode: compute absolute position in map frame
             tag_world_north, tag_world_east = self.tag_map[tag_id]
             drone_map_north = tag_world_north + tag_rel_north
             drone_map_east = tag_world_east + tag_rel_east
 
-            # Lock offset to align map frame with EKF2 frame on first detection
             if not self.origin_locked:
                 self.offset_north = self.drone_x - drone_map_north
                 self.offset_east = self.drone_y - drone_map_east
@@ -346,7 +361,6 @@ class AprilTagOdometry(Node):
             down_raw = body_down + self.offset_down
 
         else:
-            # Single tag mode (legacy): tag is implicitly at origin
             if not self.origin_locked:
                 self.offset_north = self.drone_x - tag_rel_north
                 self.offset_east = self.drone_y - tag_rel_east
@@ -376,22 +390,12 @@ class AprilTagOdometry(Node):
         msg = VehicleOdometry()
         msg.timestamp = self._tf_timestamp_us
         msg.timestamp_sample = self._tf_timestamp_us
-
-        # Position in NED frame
         msg.pose_frame = VehicleOdometry.POSE_FRAME_NED
         msg.position = [float(north), float(east), float(down)]
-
-        # Orientation - NaN (not providing yaw from AprilTag)
         msg.q = [float('nan'), float('nan'), float('nan'), float('nan')]
-
-        # Velocity - NaN (let EKF2 derive from position)
         msg.velocity_frame = VehicleOdometry.VELOCITY_FRAME_UNKNOWN
         msg.velocity = [float('nan'), float('nan'), float('nan')]
-
-        # Angular velocity - not provided
         msg.angular_velocity = [float('nan'), float('nan'), float('nan')]
-
-        # Variances
         msg.position_variance = [
             float(self.position_variance[0]),
             float(self.position_variance[1]),
@@ -403,15 +407,12 @@ class AprilTagOdometry(Node):
             float(self.orientation_variance[2])
         ]
         msg.velocity_variance = [float('nan'), float('nan'), float('nan')]
-
-        # Quality indicator (0-100)
         msg.quality = 100
 
-        # Only publish if not in dry run mode
         if not self.dry_run:
             self.odom_pub.publish(msg)
 
-        # Log periodically for debugging
+        # Log periodically
         now = time.time()
         if self.last_publish_time is None or now - self.last_publish_time > 1.0:
             heading_deg = math.degrees(self.drone_heading)

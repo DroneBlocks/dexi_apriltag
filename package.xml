@@ -3,7 +3,7 @@
 <package format="3">
   <name>dexi_apriltag</name>
   <version>0.0.0</version>
-  <description>AprilTag detection and following for DEXI drones</description>
+  <description>AprilTag corridor navigation and odometry for DEXI drones</description>
   <maintainer email="db@droneblocks.com">Dennis Baldwin</maintainer>
   <license>TODO: License declaration</license>
 

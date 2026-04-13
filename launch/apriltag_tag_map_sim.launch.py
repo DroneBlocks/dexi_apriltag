@@ -1,4 +1,5 @@
 import os
+import sys
 import yaml
 
 from launch import LaunchDescription
@@ -9,10 +10,10 @@ from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
-    """Launch AprilTag odometry with tag map for simulation testing.
+    """Launch AprilTag odometry with tag map.
 
     Loads a tag map YAML and starts the odometry node in tag map mode.
-    Assumes apriltag_ros is already running (e.g., from dexi_bringup_unity_sim).
+    Assumes apriltag_ros is already running (e.g., from dexi_bringup).
     """
     ld = LaunchDescription()
 
@@ -61,24 +62,27 @@ def generate_launch_description():
     )
     ld.add_action(static_tf_node)
 
-    # Load tag map YAML and extract arrays for ROS parameters
-    # We need to resolve the default at generation time since
-    # LaunchConfiguration isn't available yet for file I/O
-    tag_map_file = LaunchConfiguration('tag_map_file')
+    # Load tag map YAML — resolve the file path from the launch argument
+    # Since LaunchConfiguration can't be used for file I/O at generation time,
+    # check sys.argv for an override, otherwise use the default
+    tag_map_path = default_tag_map
+    for i, arg in enumerate(sys.argv):
+        if 'tag_map_file:=' in arg:
+            tag_map_path = arg.split(':=')[1]
+            break
 
-    # For the default case, load the YAML directly
     tag_map_ids = []
     tag_map_x = []
     tag_map_y = []
     try:
-        with open(default_tag_map, 'r') as f:
+        with open(tag_map_path, 'r') as f:
             tag_data = yaml.safe_load(f)
         tag_map = tag_data.get('tag_map', {})
         tag_map_ids = tag_map.get('ids', [])
         tag_map_x = tag_map.get('x', [])
         tag_map_y = tag_map.get('y', [])
     except Exception as e:
-        print(f'Warning: Could not load tag map: {e}')
+        print(f'Warning: Could not load tag map from {tag_map_path}: {e}')
 
     # AprilTag Odometry Node with tag map
     apriltag_odometry_node = Node(
@@ -89,7 +93,7 @@ def generate_launch_description():
         parameters=[{
             'tag_family': 'tag36h11',
             'publish_rate': 10.0,
-            'position_variance': [2.0, 2.0, 100.0],
+            'position_variance': [10.0, 10.0, 100.0],
             'orientation_variance': [0.01, 0.01, 0.01],
             'filter_length': 5,
             'tag_map_ids': tag_map_ids,
