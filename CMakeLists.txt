@@ -10,30 +10,28 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(px4_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(tf2_ros REQUIRED)
-find_package(tf2 REQUIRED)
 find_package(apriltag_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(dexi_interfaces REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2 REQUIRED)
 
 include_directories(include)
 
-# AprilTag Follower
-add_executable(apriltag_follower src/apriltag_follower.cpp)
-target_include_directories(apriltag_follower PUBLIC
+# AprilTag Odometry (C++)
+add_executable(apriltag_odometry_node src/apriltag_odometry.cpp)
+target_include_directories(apriltag_odometry_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_compile_features(apriltag_follower PUBLIC c_std_99 cxx_std_17)
+target_compile_features(apriltag_odometry_node PUBLIC cxx_std_17)
 ament_target_dependencies(
-  apriltag_follower
+  apriltag_odometry_node
   "rclcpp"
   "px4_msgs"
   "apriltag_msgs"
-  "sensor_msgs"
-  "geometry_msgs"
   "tf2_ros"
   "tf2"
 )
@@ -56,7 +54,7 @@ ament_target_dependencies(
   "image_transport"
 )
 
-install(TARGETS apriltag_follower apriltag_visualizer
+install(TARGETS apriltag_odometry_node apriltag_visualizer
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY
@@ -72,10 +70,9 @@ install(DIRECTORY
 
 # Install Python scripts
 install(PROGRAMS
-  scripts/precision_landing.py
   scripts/apriltag_odometry.py
-  scripts/test_visual_odometry.py
-  scripts/tag_map_shuttle_test.py
+  scripts/precision_landing.py
+  scripts/tag_navigate_and_land.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,0 +1,18 @@
+# Physical tag map for real hardware testing
+#
+# Layout: 2 columns x 2 rows (tags 0-3)
+# Column spacing: 0.5m (East axis)
+# Row spacing: 1.0m (North axis)
+# Same layout as sim tag_map_sim.yaml, just fewer tags
+#
+# Tag layout (looking down, drone starts near tags 0/1):
+#   E = -0.25  E = +0.25
+#   [0]  [1]    North = 0.0   <- start here
+#   [2]  [3]    North = 1.0
+#
+# Tag size: 0.10m (4 inches)
+
+tag_map:
+  ids: [0, 1, 2, 3]
+  x:   [0.0, 0.0, 1.0, 1.0]       # NED North
+  y:   [-0.25, 0.25, -0.25, 0.25]  # NED East

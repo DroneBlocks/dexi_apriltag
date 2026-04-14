@@ -103,7 +103,7 @@ class TagNavigateAndLand(Node):
         """Launch precision landing node as a subprocess."""
         cmd = [
             'python3',
-            '/home/ubuntu/dexi_ws/src/dexi_apriltag/scripts/precision_landing.py',
+            '/home/dexi/dexi_ws/src/dexi_apriltag/scripts/precision_landing.py',
             '--ros-args',
             '-p', f'target_tag_id:={self.landing_tag_id}',
             '-p', 'detection_delay:=2.0',
