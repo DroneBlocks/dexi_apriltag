@@ -18,7 +18,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import tf2_ros
-from px4_msgs.msg import TrajectorySetpoint, OffboardControlMode, VehicleLocalPosition, VehicleCommand
+from px4_msgs.msg import TrajectorySetpoint, OffboardControlMode, VehicleLocalPosition, VehicleCommand, VehicleLandDetected
 from std_msgs.msg import Bool
 from dexi_interfaces.srv import LEDRingColor
 import time
@@ -53,6 +53,7 @@ class PrecisionLanding(Node):
         self.declare_parameter('landing_altitude', 0.15)  # meters above ground to detect landing
         self.declare_parameter('final_descent_rate', 0.15)  # slower descent near ground
         self.declare_parameter('landing_velocity_threshold', 0.05)  # m/s - detect stopped
+        self.declare_parameter('min_takeoff_altitude', 0.30)  # m - won't engage until above this
 
         self.tag_family = self.get_parameter('tag_family').value
         self.target_tag_id = self.get_parameter('target_tag_id').value
@@ -66,6 +67,7 @@ class PrecisionLanding(Node):
         self.landing_altitude = self.get_parameter('landing_altitude').value
         self.final_descent_rate = self.get_parameter('final_descent_rate').value
         self.landing_velocity_threshold = self.get_parameter('landing_velocity_threshold').value
+        self.min_takeoff_altitude = self.get_parameter('min_takeoff_altitude').value
 
         # QoS for PX4
         px4_qos = QoSProfile(
@@ -92,6 +94,14 @@ class PrecisionLanding(Node):
         self.local_pos_sub = self.create_subscription(
             VehicleLocalPosition, '/fmu/out/vehicle_local_position',
             self.local_position_callback, px4_qos)
+        # PX4's own land detection — independent of altitude reading. Uses
+        # thrust/vibration/IMU to determine ground contact. We use this as
+        # an additional disarm trigger because the range sensor (PAW3902)
+        # has ~0.5m min range and EKF altitude can stick above touchdown.
+        self.land_detected = False
+        self.land_detected_sub = self.create_subscription(
+            VehicleLandDetected, '/fmu/out/vehicle_land_detected',
+            self.land_detected_callback, px4_qos)
 
         # LED service client
         self.led_client = self.create_client(
@@ -116,6 +126,12 @@ class PrecisionLanding(Node):
         self.last_tag_y = None
         self.ground_contact_time = None  # Time when we first detected ground contact
         self.centered_since = None  # Time when drone first became centered (for stable lock)
+        self.target_z = None  # Locked altitude captured on CENTERING entry — prevents drift-ratchet
+        self.target_x = None  # Locked X captured on first "centered" — prevents XY drift-ratchet
+        self.target_y = None
+        self.tag_loss_start = None  # Time of latest tag-loss start (for grace-period timer)
+        self.centered_exit_threshold = 0.40  # Hysteresis: must drift past this to leave "centered"
+        self.tag_loss_grace = 2.0  # seconds — brief tag loss within this window doesn't reset timer
 
         # Moving average filter buffers (ModalAI approach)
         self.tag_x_buffer = deque(maxlen=self.filter_length)
@@ -154,6 +170,14 @@ class PrecisionLanding(Node):
         self.current_vz = msg.vz  # Vertical velocity (positive = down in NED)
         self.drone_heading = msg.heading  # Heading in radians (0 = North, positive = clockwise)
         self.last_position_time = time.time()
+
+    def land_detected_callback(self, msg):
+        """PX4's own ground-contact detection (uses thrust/IMU, not altitude)."""
+        # `landed` = drone is on the ground (high confidence)
+        # We trust this signal independent of EKF altitude.
+        if msg.landed and not self.land_detected:
+            self.get_logger().info('PX4 reports vehicle_land_detected.landed=True')
+        self.land_detected = msg.landed
 
     def get_filtered_tag_position(self):
         """Get moving average of tag position. Returns (x, y) or (None, None) if no data."""
@@ -232,6 +256,11 @@ class PrecisionLanding(Node):
         msg.attitude = False
         msg.body_rate = False
         self.offboard_mode_pub.publish(msg)
+        # Also keep dexi_offboard_manager paused while script runs. The
+        # manager's subscription is default-QoS (volatile), so a single
+        # publish at startup risks being lost during DDS discovery. We
+        # piggyback on this 10 Hz heartbeat — robust without spamming.
+        self.pause_offboard_setpoints(True)
 
     def body_to_ned(self, vx_body, vy_body):
         """Convert body-frame velocities to NED world-frame.
@@ -260,11 +289,15 @@ class PrecisionLanding(Node):
         msg.yawspeed = 0.0
         self.setpoint_pub.publish(msg)
 
-    def send_position_setpoint(self, vx_body, vy_body, vz):
+    def send_position_setpoint(self, vx_body, vy_body, vz, fixed_z=None):
         """Send position setpoint based on desired body-frame velocities.
 
         Uses position control like apriltag_follower - computes target position
         from current position + velocity * dt.
+
+        If fixed_z is provided, that NED Down value is used as target_z instead
+        of (drone_z + vz*dt). This prevents the drift-ratchet that occurs when
+        vz=0 and target_z keeps re-reading current drone_z each loop.
         """
         msg = TrajectorySetpoint()
         msg.timestamp = int(time.time() * 1e6)
@@ -290,7 +323,10 @@ class PrecisionLanding(Node):
             dt = 0.2  # Time horizon for position command (same as apriltag_follower)
             target_x = self.drone_x + vx_ned * dt
             target_y = self.drone_y + vy_ned * dt
-            target_z = self.drone_z + vz * dt  # vz is already in NED (positive = down)
+            if fixed_z is not None:
+                target_z = fixed_z
+            else:
+                target_z = self.drone_z + vz * dt  # vz is already in NED (positive = down)
 
             # Position setpoint in NED
             msg.position = [target_x, target_y, target_z]
@@ -322,18 +358,45 @@ class PrecisionLanding(Node):
         self.vehicle_command_pub.publish(msg)
         self.get_logger().info('Disarm command sent')
 
+    def send_offboard_mode_command(self):
+        """Switch flight mode to OFFBOARD (PX4 custom main mode 6)."""
+        msg = VehicleCommand()
+        msg.timestamp = int(time.time() * 1e6)
+        msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
+        msg.param1 = 1.0  # custom mode flag
+        msg.param2 = 6.0  # PX4_CUSTOM_MAIN_MODE_OFFBOARD
+        msg.target_system = 1
+        msg.target_component = 1
+        msg.source_system = 1
+        msg.source_component = 1
+        msg.from_external = True
+        self.vehicle_command_pub.publish(msg)
+        self.get_logger().info('OFFBOARD mode command sent')
+
     def control_loop(self):
         """Main control loop - runs at 20Hz."""
         tag_found = self.get_tag_position()
 
         if self.state == LandingState.SEARCHING:
-            if tag_found:
+            # AIRBORNE GATE: do not engage until the drone is actually flying.
+            # Without this, a tag visible while the drone sits on the ground will
+            # trigger the state machine, send OFFBOARD mode, and on arm the drone
+            # ratchets up trying to "hold" the captured ground altitude.
+            airborne = self.current_altitude > self.min_takeoff_altitude
+            if tag_found and not airborne:
+                self.get_logger().warn(
+                    f'Tag visible but altitude {self.current_altitude:.2f}m < '
+                    f'min_takeoff_altitude {self.min_takeoff_altitude:.2f}m — '
+                    f'staying in SEARCHING. Take off first.',
+                    throttle_duration_sec=2.0)
+            if tag_found and airborne:
                 self.get_logger().info(f'Tag detected! Waiting {self.detection_delay}s before landing...')
                 self.set_led_color('purple')
                 self.detection_time = time.time()
                 self.state = LandingState.DETECTED
             else:
-                # Hold position (zero velocity)
+                # Hold position (zero velocity) — script setpoints are ignored anyway
+                # when drone is in POSCTL/disarmed.
                 self.send_position_setpoint(0.0, 0.0, 0.0)
 
         elif self.state == LandingState.DETECTED:
@@ -347,6 +410,13 @@ class PrecisionLanding(Node):
                 self.get_logger().info('Starting centering maneuver')
                 self.set_led_color('white')
                 self.pause_offboard_setpoints(True, log=True)  # Take control from offboard manager
+                self.send_offboard_mode_command()  # Switch PX4 to OFFBOARD if currently in POSCTL/etc
+                # Lock target altitude at the entry to CENTERING. Re-using live drone_z
+                # every loop creates a positive-feedback ratchet (drift-up bug).
+                self.target_z = self.drone_z
+                self.target_x = None  # XY locks once first "centered"
+                self.target_y = None
+                self.get_logger().info(f'Locked target altitude: drone_z={self.target_z:.2f} (alt={-self.target_z:.2f}m)')
                 self.state = LandingState.CENTERING
             else:
                 # Still waiting, hold position
@@ -360,10 +430,26 @@ class PrecisionLanding(Node):
 
             # Very slow continuous movement toward filtered tag position
             if not tag_found:
-                self.get_logger().warn('Tag lost! Holding position...', throttle_duration_sec=1.0)
-                self.send_hold_position(self.drone_x, self.drone_y, self.drone_z)
-                self.centered_since = None
+                # Track tag-loss start so we can apply a grace period before resetting timer
+                if self.tag_loss_start is None:
+                    self.tag_loss_start = time.time()
+                loss_duration = time.time() - self.tag_loss_start
+
+                self.get_logger().warn(
+                    f'Tag lost ({loss_duration:.1f}s)! Holding locked position...',
+                    throttle_duration_sec=1.0)
+                # Use locked targets if available, else fall back to current
+                hx = self.target_x if self.target_x is not None else self.drone_x
+                hy = self.target_y if self.target_y is not None else self.drone_y
+                hz = self.target_z if self.target_z is not None else self.drone_z
+                self.send_hold_position(hx, hy, hz)
+                # Only reset the centered timer if tag has been lost longer than grace period
+                if loss_duration > self.tag_loss_grace:
+                    self.centered_since = None
                 return
+
+            # Tag IS visible past this point — clear any prior tag-loss timer
+            self.tag_loss_start = None
 
             # Use RAW position for threshold check (prevents false "centered" during orbiting)
             # The moving average can make it appear centered when averaging positions on both sides
@@ -374,11 +460,40 @@ class PrecisionLanding(Node):
             error_x = filtered_x if filtered_x is not None else self.tag_x
             error_y = filtered_y if filtered_y is not None else self.tag_y
 
-            if raw_magnitude < self.centering_threshold:
+            # Hysteresis: once "centered," we tolerate raw up to centered_exit_threshold
+            # before declaring not-centered. This prevents the timer from flapping when
+            # the drone hovers right at the boundary.
+            already_centered = self.centered_since is not None
+            entered_centered = raw_magnitude < self.centering_threshold
+            still_centered = raw_magnitude < self.centered_exit_threshold
+
+            if entered_centered or (already_centered and still_centered):
                 # Centered - track stable duration
                 if self.centered_since is None:
                     self.centered_since = time.time()
-                    self.get_logger().info(f'Centered! Holding for {self.stable_centering_duration:.1f}s...')
+                # Continuously refine the tag's NED on every detection.
+                # On first centered, capture initial estimate. On subsequent
+                # detections, low-pass-filter into target so each new sample
+                # nudges the lock toward the latest measurement instead of
+                # being stuck at a one-shot estimate that may have been
+                # taken with stale body-offset (drone in motion).
+                tag_n_offset, tag_e_offset = self.body_to_ned(self.tag_x, self.tag_y)
+                new_target_x = self.drone_x + tag_n_offset
+                new_target_y = self.drone_y + tag_e_offset
+                if self.target_x is None:
+                    self.target_x = new_target_x
+                    self.target_y = new_target_y
+                    self.get_logger().info(
+                        f'Centered! Holding for {self.stable_centering_duration:.1f}s '
+                        f'at TAG NED [{self.target_x:.2f}, {self.target_y:.2f}, {self.target_z:.2f}] '
+                        f'(drone was at [{self.drone_x:.2f}, {self.drone_y:.2f}], '
+                        f'body offset [{self.tag_x:.2f}, {self.tag_y:.2f}])')
+                else:
+                    # Low-pass filter: 80% old + 20% new — smooth, but pulls
+                    # toward the latest tag-relative measurement
+                    alpha = 0.8
+                    self.target_x = alpha * self.target_x + (1.0 - alpha) * new_target_x
+                    self.target_y = alpha * self.target_y + (1.0 - alpha) * new_target_y
 
                 stable_time = time.time() - self.centered_since
                 if stable_time >= self.stable_centering_duration:
@@ -390,10 +505,10 @@ class PrecisionLanding(Node):
                     self.get_logger().info(
                         f'Holding: raw={raw_magnitude:.2f}m, lock in {remaining:.1f}s',
                         throttle_duration_sec=0.5)
-                    # Hold current position
-                    self.send_hold_position(self.drone_x, self.drone_y, self.drone_z)
+                    # Hold the LOCKED target (not live drone_x/y/z)
+                    self.send_hold_position(self.target_x, self.target_y, self.target_z)
             else:
-                # Not centered - move very slowly toward tag
+                # Not centered - move very slowly toward tag (drift past exit threshold)
                 self.centered_since = None
 
                 # Normalize direction and apply fixed slow speed
@@ -409,8 +524,9 @@ class PrecisionLanding(Node):
                     f'Centering: raw={raw_magnitude:.2f}m, filtered={filtered_magnitude:.2f}m, pos=[{self.tag_x:.2f}, {self.tag_y:.2f}]',
                     throttle_duration_sec=0.5)
 
-                # Move slowly toward tag
-                self.send_position_setpoint(vx, vy, 0.0)
+                # Move slowly toward tag, but keep altitude LOCKED at target_z
+                # to prevent vertical drift while chasing tag in XY.
+                self.send_position_setpoint(vx, vy, 0.0, fixed_z=self.target_z)
 
         elif self.state == LandingState.LANDING:
             # Re-assert pause to ensure offboard manager doesn't interfere
@@ -467,11 +583,21 @@ class PrecisionLanding(Node):
             # Send position setpoint - keep centering while descending
             self.send_position_setpoint(vx, vy, descent)
 
-            # Detect ground contact: low altitude AND velocity near zero
-            if self.current_altitude < self.landing_altitude and abs(self.current_vz) < self.landing_velocity_threshold:
+            # Detect ground contact via two independent signals:
+            #   (a) PX4's own land detector (uses thrust/IMU, not altitude) —
+            #       this fires reliably at touchdown even when range sensor
+            #       can't read below ~0.5m.
+            #   (b) altitude < landing_altitude AND vz ~ 0 — fallback for
+            #       when range is reliable (i.e. higher tag/ground stack).
+            altitude_landed = (
+                self.current_altitude < self.landing_altitude
+                and abs(self.current_vz) < self.landing_velocity_threshold
+            )
+            if self.land_detected or altitude_landed:
                 if self.ground_contact_time is None:
                     self.ground_contact_time = time.time()
-                    self.get_logger().info('Ground contact detected, confirming...')
+                    reason = 'PX4 land_detected' if self.land_detected else 'altitude+vz'
+                    self.get_logger().info(f'Ground contact detected ({reason}), confirming...')
                 elif time.time() - self.ground_contact_time > 0.5:  # Confirm for 0.5s
                     self.get_logger().info('Landing confirmed! Disarming...')
                     self.set_led_color('green')
