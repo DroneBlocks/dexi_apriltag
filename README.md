@@ -12,7 +12,7 @@ Fly along a corridor of AprilTags using tag-based visual odometry fused into PX4
 |------|---------|
 | `apriltag_odometry.py` | Publishes tag poses as VehicleOdometry to PX4 EKF2 |
 | `corridor_navigation.py` | Flies centerline waypoints along a tag corridor |
-| `precision_landing.py` | Autonomous precision landing on a specific tag |
+| `precision_landing.py` | Autonomous precision landing on a specific tag — see [docs/precision_landing.md](docs/precision_landing.md) |
 | `apriltag_visualizer` | Debug visualization of tag detections (C++) |
 
 ### How it works
