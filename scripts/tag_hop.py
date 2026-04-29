@@ -12,8 +12,13 @@ velocity uses gyro+accel attitude (very accurate) — drone moves in real
 world regardless of EKF position state. Vision (TF for the next tag in
 the sequence) decides arrival, not EKF distance.
 
-LED sequence: off → purple (settle) → cyan (centered/hold) → yellow
-(transit) → red (descent) → green (landed).
+This script drives `dexi_offboard_manager` via OffboardNavCommand on
+`/dexi/offboard_manager` — it does NOT publish to PX4 directly. That
+keeps `dexi_offboard_manager` as the single FC interface and avoids the
+heartbeat-flag conflict you'd otherwise get from two parallel publishers.
+
+LED sequence: off → purple (settle) → detection_led_color (centered/hold)
+→ yellow (transit) → red (AUTO.LAND descent) → green (landed).
 
 Manual override: any RC mode flip away from OFFBOARD triggers a sticky
 abort. Land manually, take off again, sequence re-engages automatically.
@@ -29,13 +34,10 @@ import rclpy
 import tf2_ros
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool
 
+from dexi_interfaces.msg import OffboardNavCommand
 from dexi_interfaces.srv import LEDRingColor
 from px4_msgs.msg import (
-    OffboardControlMode,
-    TrajectorySetpoint,
-    VehicleCommand,
     VehicleLandDetected,
     VehicleLocalPosition,
     VehicleStatus,
@@ -112,14 +114,9 @@ class TagHop(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        self.offboard_mode_pub = self.create_publisher(
-            OffboardControlMode, '/fmu/in/offboard_control_mode', px4_qos)
-        self.setpoint_pub = self.create_publisher(
-            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', px4_qos)
-        self.vehicle_command_pub = self.create_publisher(
-            VehicleCommand, '/fmu/in/vehicle_command', px4_qos)
-        self.pause_setpoints_pub = self.create_publisher(
-            Bool, '/dexi/pause_setpoints', 10)
+        # All FC interaction goes through dexi_offboard_manager.
+        self.nav_cmd_pub = self.create_publisher(
+            OffboardNavCommand, '/dexi/offboard_manager', 10)
 
         self.local_pos_sub = self.create_subscription(
             VehicleLocalPosition, '/fmu/out/vehicle_local_position',
@@ -156,6 +153,11 @@ class TagHop(Node):
         self.target_z = None  # locked altitude, captured on first CENTERING
         self.tag_loss_start = None
         self.aborted = False  # set on manual override; sticks until restart
+        # Last NED target sent to dexi_offboard.gotoNED, for change-based
+        # throttling so we don't spam the offboard manager with identical
+        # targets (it logs every call).
+        self._last_goto = None
+        self._goto_threshold = 0.05  # m, must move this much to re-send
 
         # Drone state
         self.drone_x = 0.0
@@ -179,7 +181,6 @@ class TagHop(Node):
 
         # ----- Timers -----
         self.control_timer = self.create_timer(0.05, self.control_loop)   # 20 Hz
-        self.heartbeat_timer = self.create_timer(0.1, self.send_heartbeat)  # 10 Hz
 
         self.get_logger().info('Tag Hop initialized')
         self.get_logger().info(f'Sequence: {self.sequence}')
@@ -295,6 +296,9 @@ class TagHop(Node):
                 sum(self.tag_y_buffer) / len(self.tag_y_buffer))
 
     def body_to_ned(self, vx_body, vy_body):
+        """Rotate a body-frame XY vector to NED using current drone heading.
+        Used to project the body-frame tag offset onto the EKF NED frame
+        so we can lock the tag's NED position as a HOLDING target."""
         c = cos(self.drone_heading)
         s = sin(self.drone_heading)
         return vx_body * c - vy_body * s, vx_body * s + vy_body * c
@@ -306,98 +310,59 @@ class TagHop(Node):
         request.color = color
         self.led_client.call_async(request)
 
-    def pause_offboard_setpoints(self, pause: bool, log: bool = False):
-        msg = Bool()
-        msg.data = pause
-        self.pause_setpoints_pub.publish(msg)
-        if log:
-            self.get_logger().info(f'pause_offboard_setpoints({pause})')
+    # ----- dexi_offboard_manager command helpers -----
 
-    # ----- Setpoint helpers -----
+    def cmd_start_offboard_heartbeat(self):
+        """Tell dexi_offboard to start its OFFBOARD heartbeat thread.
+        It auto-engages OFFBOARD ~1 s after the thread starts."""
+        msg = OffboardNavCommand()
+        msg.command = 'start_offboard_heartbeat'
+        self.nav_cmd_pub.publish(msg)
+        self.get_logger().info('start_offboard_heartbeat sent')
 
-    def send_heartbeat(self):
-        # Stop advertising OFFBOARD once we've handed off to PX4 AUTO.LAND.
-        # Otherwise the heartbeat keeps signaling "OFFBOARD wants control"
-        # which can interfere with PX4's descent.
-        if self.state == HopState.AUTO_LANDING or self.aborted:
-            return
-        msg = OffboardControlMode()
-        msg.timestamp = int(time.time() * 1e6)
-        msg.position = True
-        msg.velocity = True
-        msg.acceleration = False
-        msg.attitude = False
-        msg.body_rate = False
-        self.offboard_mode_pub.publish(msg)
-        self.pause_offboard_setpoints(True)
+    def cmd_set_velocity_body(self, vx, vy, vz, yaw_rate_deg=0.0):
+        """Body-frame velocity (forward, right, down) at dexi_offboard.
+        OffboardNavCommand reuses north/east/down for body vx/vy/vz."""
+        msg = OffboardNavCommand()
+        msg.command = 'set_velocity_body'
+        msg.north = float(vx)
+        msg.east = float(vy)
+        msg.down = float(vz)
+        msg.yaw = float(yaw_rate_deg)
+        self.nav_cmd_pub.publish(msg)
+        self._last_goto = None  # invalidate goto throttle on velocity switch
 
-    def send_hold_position(self, target_x, target_y, target_z):
-        msg = TrajectorySetpoint()
-        msg.timestamp = int(time.time() * 1e6)
-        msg.position = [float(target_x), float(target_y), float(target_z)]
-        msg.velocity = [0.0, 0.0, 0.0]
-        msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        msg.yaw = float('nan')
-        msg.yawspeed = 0.0
-        self.setpoint_pub.publish(msg)
+    def cmd_goto_ned(self, n, e, d, yaw_deg=float('nan')):
+        """NED position target. Throttled — only re-sent when target moves
+        more than self._goto_threshold meters, since dexi_offboard's
+        gotoNED logs every call and tag_hop refines target each loop."""
+        if self._last_goto is not None:
+            ln, le, ld = self._last_goto
+            if (abs(n - ln) < self._goto_threshold
+                    and abs(e - le) < self._goto_threshold
+                    and abs(d - ld) < self._goto_threshold):
+                return
+        msg = OffboardNavCommand()
+        msg.command = 'goto_ned'
+        msg.north = float(n)
+        msg.east = float(e)
+        msg.down = float(d)
+        msg.yaw = float(yaw_deg)
+        self.nav_cmd_pub.publish(msg)
+        self._last_goto = (n, e, d)
 
-    def send_position_setpoint(self, vx_body, vy_body, vz, fixed_z=None):
-        msg = TrajectorySetpoint()
-        msg.timestamp = int(time.time() * 1e6)
-        position_stale = (self.last_position_time is not None
-                          and (time.time() - self.last_position_time) > 0.2)
-        vx_ned, vy_ned = self.body_to_ned(vx_body, vy_body)
-        if position_stale:
-            msg.position = [float('nan'), float('nan'), float('nan')]
-            msg.velocity = [vx_ned, vy_ned, vz]
-        else:
-            dt = 0.2
-            target_x = self.drone_x + vx_ned * dt
-            target_y = self.drone_y + vy_ned * dt
-            if fixed_z is not None:
-                target_z = fixed_z
-            else:
-                target_z = self.drone_z + vz * dt
-            msg.position = [float(target_x), float(target_y), float(target_z)]
-            msg.velocity = [vx_ned, vy_ned, vz]
-        msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        msg.yaw = float('nan')
-        msg.yawspeed = 0.0
-        self.setpoint_pub.publish(msg)
-
-    def send_offboard_mode_command(self):
-        msg = VehicleCommand()
-        msg.timestamp = int(time.time() * 1e6)
-        msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
-        msg.param1 = 1.0
-        msg.param2 = 6.0  # PX4_CUSTOM_MAIN_MODE_OFFBOARD
-        msg.target_system = 1
-        msg.target_component = 1
-        msg.source_system = 1
-        msg.source_component = 1
-        msg.from_external = True
-        self.vehicle_command_pub.publish(msg)
-        self.get_logger().info('OFFBOARD mode command sent')
-
-    def send_auto_land_mode_command(self):
-        msg = VehicleCommand()
-        msg.timestamp = int(time.time() * 1e6)
-        msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
-        msg.param1 = 1.0
-        msg.param2 = 4.0  # PX4_CUSTOM_MAIN_MODE_AUTO
-        msg.param3 = 6.0  # PX4_CUSTOM_SUB_MODE_AUTO_LAND
-        msg.target_system = 1
-        msg.target_component = 1
-        msg.source_system = 1
-        msg.source_component = 1
-        msg.from_external = True
-        self.vehicle_command_pub.publish(msg)
-        self.get_logger().info('AUTO.LAND mode command sent')
+    def cmd_land(self):
+        """Trigger PX4 AUTO.LAND via dexi_offboard. Its land() also stops
+        the OFFBOARD heartbeat so PX4 cleanly owns the descent."""
+        msg = OffboardNavCommand()
+        msg.command = 'land'
+        self.nav_cmd_pub.publish(msg)
+        self.get_logger().info('land command sent (PX4 AUTO.LAND)')
 
     def start_auto_landing(self):
         """Hand off to PX4 AUTO.LAND for descent + disarm."""
         self.set_led_color('red')
-        self.send_auto_land_mode_command()
+        self.cmd_land()
         self.state = HopState.AUTO_LANDING
 
     # ----- Main control loop -----
@@ -430,7 +395,6 @@ class TagHop(Node):
                 f'aborted. Land and take off again to re-engage.')
             self.set_led_color('black')
             self.aborted = True
-            self.pause_offboard_setpoints(False, log=True)
             return
 
         if self.state == HopState.SEARCHING:
@@ -442,8 +406,6 @@ class TagHop(Node):
                 self.set_led_color('purple')
                 self.detection_time = time.time()
                 self.state = HopState.DETECTED
-            else:
-                self.send_position_setpoint(0.0, 0.0, 0.0)
 
         elif self.state == HopState.DETECTED:
             if not tag_found:
@@ -455,8 +417,7 @@ class TagHop(Node):
                     f'Engaging on tag {self.current_target_tag_id()} '
                     f'(LED {self.detection_led_color})')
                 self.set_led_color(self.detection_led_color)
-                self.pause_offboard_setpoints(True, log=True)
-                self.send_offboard_mode_command()
+                self.cmd_start_offboard_heartbeat()
                 self.offboard_requested = True
                 # Lock target altitude on first centering
                 self.target_z = self.drone_z
@@ -467,11 +428,8 @@ class TagHop(Node):
                 self.state = HopState.CENTERING
                 self.get_logger().info(
                     f'Locked target altitude: {-self.target_z:.2f} m')
-            else:
-                self.send_position_setpoint(0.0, 0.0, 0.0)
 
         elif self.state == HopState.CENTERING:
-            self.pause_offboard_setpoints(True)
             if not tag_found:
                 if self.tag_loss_start is None:
                     self.tag_loss_start = time.time()
@@ -482,7 +440,7 @@ class TagHop(Node):
                 hx = self.target_x if self.target_x is not None else self.drone_x
                 hy = self.target_y if self.target_y is not None else self.drone_y
                 hz = self.target_z if self.target_z is not None else self.drone_z
-                self.send_hold_position(hx, hy, hz)
+                self.cmd_goto_ned(hx, hy, hz)
                 if loss_duration > self.tag_loss_grace:
                     self.centered_since = None
                 return
@@ -517,7 +475,7 @@ class TagHop(Node):
                         f'{self.hover_duration:.0f}s')
                     self.hold_start_time = time.time()
                     self.state = HopState.HOLDING
-                self.send_hold_position(self.target_x, self.target_y, self.target_z)
+                self.cmd_goto_ned(self.target_x, self.target_y, self.target_z)
             else:
                 # Not centered — chase the tag at slow speed
                 self.centered_since = None
@@ -534,10 +492,9 @@ class TagHop(Node):
                     f'Centering on tag {self.current_target_tag_id()}: '
                     f'raw={raw_magnitude:.2f}m, vx_body={vx:.2f}, vy_body={vy:.2f}',
                     throttle_duration_sec=0.5)
-                self.send_position_setpoint(vx, vy, 0.0, fixed_z=self.target_z)
+                self.cmd_set_velocity_body(vx, vy, 0.0)
 
         elif self.state == HopState.HOLDING:
-            self.pause_offboard_setpoints(True)
             elapsed = time.time() - self.hold_start_time
             # Continuously refine target on each detection during hold
             if tag_found:
@@ -547,7 +504,7 @@ class TagHop(Node):
                 alpha = 0.9
                 self.target_x = alpha * self.target_x + (1.0 - alpha) * new_target_x
                 self.target_y = alpha * self.target_y + (1.0 - alpha) * new_target_y
-            self.send_hold_position(self.target_x, self.target_y, self.target_z)
+            self.cmd_goto_ned(self.target_x, self.target_y, self.target_z)
             self.get_logger().info(
                 f'Hold tag {self.current_target_tag_id()}: {self.hover_duration - elapsed:.1f}s left',
                 throttle_duration_sec=1.0)
@@ -578,7 +535,6 @@ class TagHop(Node):
             # tag_map NED targets. Arrival is detected by the next target
             # tag becoming visible in TF — at which point CENTERING takes
             # over its body-frame chase.
-            self.pause_offboard_setpoints(True)
             elapsed = (time.time() - self.transit_start_time
                        if self.transit_start_time is not None else 0.0)
             # Only acquire the next tag after min_transit_duration has elapsed.
@@ -609,8 +565,7 @@ class TagHop(Node):
                 f'[fwd={vx_body:.2f}, right={vy_body:.2f}] m/s, '
                 f'elapsed {elapsed:.1f}s',
                 throttle_duration_sec=1.0)
-            self.send_position_setpoint(vx_body, vy_body, 0.0,
-                                        fixed_z=self.target_z)
+            self.cmd_set_velocity_body(vx_body, vy_body, 0.0)
 
         elif self.state == HopState.AUTO_LANDING:
             # Hands off — PX4 owns the drone in AUTO.LAND. We do not publish
@@ -627,7 +582,6 @@ class TagHop(Node):
                 self.get_logger().info('AUTO.LAND complete (PX4 land_detected). '
                                        'Drone disarmed by PX4.')
                 self.set_led_color('green')
-                self.pause_offboard_setpoints(False, log=True)
                 self.state = HopState.LANDED
 
         elif self.state == HopState.LANDED:

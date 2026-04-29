@@ -322,15 +322,16 @@ PX4's EKF NED drifts on flow + IMU (we measured 1+ m of drift on a stationary ta
 | `detection_delay` | 2.0 | Settle window after first detection before engaging (s) |
 | `detection_led_color` | `cyan` | LED color while centering or holding on a tag |
 
-### Coexistence with `dexi_offboard_manager`
+### Architecture
 
-`tag_hop.py` publishes directly to `/fmu/in/trajectory_setpoint` and `/fmu/in/offboard_control_mode`. It pauses `dexi_offboard_manager`'s setpoints via `/dexi/pause_setpoints`, but `dexi_offboard_manager`'s OffboardControlMode heartbeat keeps publishing — and its flags can conflict with what `tag_hop` sends, causing motion glitches.
+`tag_hop.py` does NOT publish to `/fmu/in/*` directly. All FC interaction goes through `dexi_offboard_manager` via `OffboardNavCommand` on `/dexi/offboard_manager`:
 
-**Workaround:** kill `px4_offboard_manager` before running `tag_hop`:
-```bash
-sudo pkill -9 -f px4_offboard_manager
-```
-A future PR will refactor `tag_hop` to call into `dexi_offboard_manager` rather than publish directly, eliminating this conflict.
+- **CENTERING chase / TRANSIT**: `set_velocity_body` (body-frame velocity)
+- **CENTERING centered / HOLDING**: `goto_ned` (throttled — only re-sent when target moves >5 cm)
+- **Engagement**: `start_offboard_heartbeat` (auto-engages OFFBOARD ~1 s later)
+- **Sequence complete / TRANSIT timeout**: `land` (PX4 AUTO.LAND, dexi_offboard stops its heartbeat)
+
+This keeps `dexi_offboard_manager` as the single FC interface — no parallel publishers, no heartbeat-flag conflicts. You don't need to kill `px4_offboard_manager` before running.
 
 ### `apriltag_odometry` is NOT required
 
