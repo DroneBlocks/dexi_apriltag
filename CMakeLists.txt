@@ -74,6 +74,7 @@ install(PROGRAMS
   scripts/precision_landing.py
   scripts/corridor_navigation.py
   scripts/tag_yaw_track.py
+  scripts/tag_hop.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

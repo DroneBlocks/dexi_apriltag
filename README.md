@@ -11,7 +11,8 @@ Fly along a corridor of AprilTags using tag-based visual odometry fused into PX4
 | Node | Purpose |
 |------|---------|
 | `apriltag_odometry.py` | Publishes tag poses as VehicleOdometry to PX4 EKF2 |
-| `corridor_navigation.py` | Flies centerline waypoints along a tag corridor |
+| `corridor_navigation.py` | Flies centerline waypoints along a tag corridor (NED-based) |
+| `tag_hop.py` | Body-frame velocity navigation through a tag sequence — see [tag_hop.py section](#tag_hoppy) |
 | `precision_landing.py` | Autonomous precision landing on a specific tag — see [docs/precision_landing.md](docs/precision_landing.md) |
 | `apriltag_visualizer` | Debug visualization of tag detections (C++) |
 
@@ -260,6 +261,91 @@ LED feedback: Off → Purple → White → Red → Green
 ```bash
 ros2 launch dexi_apriltag precision_landing.launch.py target_tag_id:=18
 ```
+
+## tag_hop.py
+
+Body-frame velocity navigation through a sequence of AprilTag waypoints. Drone takes off in POSCTL, the script auto-engages OFFBOARD when it sees the first tag in the sequence airborne, then walks through the sequence: center on tag, hold, fly forward (or backward) until the next tag enters the camera FoV, center, hold, repeat. When the sequence completes, the script hands off to PX4 AUTO.LAND for descent and disarm.
+
+### TL;DR
+
+Lay your tags in a line. Tell the script the order to visit them and how far apart they are.
+
+```bash
+ros2 run dexi_apriltag tag_hop.py --ros-args \
+  -p sequence:="[0, 2, 4, 2, 0]" \
+  -p tag_map_ids:="[0, 2, 4]" \
+  -p tag_map_n:="[0.0, 2.0, 4.0]" \
+  -p tag_map_e:="[0.0, 0.0, 0.0]" \
+  -p hover_duration:=10.0 \
+  -p transit_speed:=0.20
+```
+
+Take off, fly steady over the first tag, **let go of the sticks** when the LED goes purple → cyan. The script flies the rest. RC mode flip aborts.
+
+### LED reference
+
+| LED | Phase |
+|---|---|
+| off | Searching for first tag (or aborted) |
+| purple | Tag detected, 2 s settle |
+| `detection_led_color` (default `cyan`) | Centering or holding on a tag |
+| yellow | Body-frame transit to next tag |
+| red | PX4 AUTO.LAND descending |
+| green | Landed and disarmed by PX4 |
+
+### Why body-frame velocity instead of NED waypoints
+
+PX4's EKF NED drifts on flow + IMU (we measured 1+ m of drift on a stationary tag in a single short flight). NED-target setpoints fight a moving estimate — drone goes the wrong direction. Body-frame velocity uses gyro+accel attitude (very accurate) so the drone moves correctly in the real world regardless of EKF state. Vision (TF for the next sequence target) decides arrival, not EKF distance. EKF can be off by meters and the corridor still works.
+
+### Workflow
+
+1. Print AprilTags (`tag36h11`, IDs from `tags/` directory). 167 mm prints validated.
+2. Configure `apriltag_node` in your bringup launch with `tag.ids`, `tag.sizes`, `tag.frames` for every tag in your sequence — without these, no TF is published.
+3. Take off in POSCTL. Approach the first tag **slowly** and hold a steady hover above it. A "hot" entry leaves residual velocity that fights the centering chase at OFFBOARD handoff.
+4. When LED goes **purple**, hands off the sticks. Cyan = script in control.
+5. Watch the LEDs. Manual override (any RC mode flip) aborts; you can land manually and take off again to re-engage.
+
+### Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `sequence` | `[0, 1, 0]` | Tag IDs to visit, in order |
+| `tag_map_ids` / `tag_map_n` / `tag_map_e` | `[0, 1]` / `[0, 1]` / `[0, 0]` | Tag positions (meters, NED). Used only to decide forward vs backward direction during TRANSIT |
+| `hover_duration` | 10.0 | Seconds to hold over each tag |
+| `transit_speed` | 0.20 | Body-frame velocity during TRANSIT (m/s) |
+| `centering_speed` | 0.20 | Body-frame velocity while chasing a tag in CENTERING (m/s) |
+| `min_transit_duration` | 1.0 | Minimum seconds in TRANSIT before allowing tag acquisition (forces visible body-frame motion when adjacent tags overlap in FoV) |
+| `transit_timeout` | 15.0 | Max seconds in TRANSIT before handing off to PX4 AUTO.LAND |
+| `centering_threshold` | 0.25 | Body-frame distance to declare centered (m) |
+| `tag_loss_grace` | 2.0 | Seconds the tag can be lost before resetting CENTERING timers |
+| `min_takeoff_altitude` | 0.30 | Airborne gate — won't engage until above this (m) |
+| `detection_delay` | 2.0 | Settle window after first detection before engaging (s) |
+| `detection_led_color` | `cyan` | LED color while centering or holding on a tag |
+
+### Coexistence with `dexi_offboard_manager`
+
+`tag_hop.py` publishes directly to `/fmu/in/trajectory_setpoint` and `/fmu/in/offboard_control_mode`. It pauses `dexi_offboard_manager`'s setpoints via `/dexi/pause_setpoints`, but `dexi_offboard_manager`'s OffboardControlMode heartbeat keeps publishing — and its flags can conflict with what `tag_hop` sends, causing motion glitches.
+
+**Workaround:** kill `px4_offboard_manager` before running `tag_hop`:
+```bash
+sudo pkill -9 -f px4_offboard_manager
+```
+A future PR will refactor `tag_hop` to call into `dexi_offboard_manager` rather than publish directly, eliminating this conflict.
+
+### `apriltag_odometry` is NOT required
+
+`tag_hop.py` does its own TF lookups against `apriltag_node` directly — it doesn't depend on `apriltag_odometry` feeding the EKF. Running `apriltag_odometry` alongside is fine for the holding phase (vision keeps EKF anchored, less drift), but if any tag in your sequence is in `apriltag_odometry`'s `tag_map_ids` and you fly over it mid-transit, the EKF gets a position correction that PX4 acts on — you'll feel a jerk. Either exclude waypoint tags from `apriltag_odometry`'s map, or kill `apriltag_odometry` entirely:
+```bash
+sudo pkill -9 -f apriltag_odometry
+```
+
+### Validated configurations
+
+- **DEXI (CM4 + ARK Pi6X + Pi Cam v2.1)**, indoor, PX4 v1.16.1, EKF on optical flow + range sensor (no GPS)
+- 167 mm printed tags
+- Corridor 4 m long: tags 0, 2, 4 at 0/2/4 m N
+- `transit_speed=0.20`, `centering_speed=0.20`, `min_transit_duration=1.0`
+- Sequence `[0, 2, 4, 2, 0]` flown end-to-end with AUTO.LAND completion
 
 ## Printing tags
 
