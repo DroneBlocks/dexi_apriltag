@@ -340,7 +340,7 @@ sudo pkill -9 -f apriltag_odometry
 
 ### Validated configurations
 
-- **DEXI .60 (CM4 + ARK Pi6X + Pi Cam v2.1)**, indoor, PX4 v1.16.1, EKF on optical flow + range sensor (no GPS)
+- **DEXI (CM4 + ARK Pi6X + Pi Cam v2.1)**, indoor, PX4 v1.16.1, EKF on optical flow + range sensor (no GPS)
 - 167 mm printed tags
 - Corridor 4 m long: tags 0, 2, 4 at 0/2/4 m N
 - `transit_speed=0.20`, `centering_speed=0.20`, `min_transit_duration=1.0`
