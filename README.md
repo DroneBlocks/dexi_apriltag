@@ -264,7 +264,7 @@ ros2 launch dexi_apriltag precision_landing.launch.py target_tag_id:=18
 
 ## tag_hop.py
 
-Body-frame velocity navigation through a sequence of AprilTag waypoints. Drone takes off in POSCTL, the script auto-engages OFFBOARD when it sees the first tag in the sequence airborne, then walks through the sequence: center on tag, hold, fly forward (or backward) until the next tag enters the camera FoV, center, hold, repeat. PX4 AUTO.LAND takes over when the final tag is lost during descent.
+Body-frame velocity navigation through a sequence of AprilTag waypoints. Drone takes off in POSCTL, the script auto-engages OFFBOARD when it sees the first tag in the sequence airborne, then walks through the sequence: center on tag, hold, fly forward (or backward) until the next tag enters the camera FoV, center, hold, repeat. When the sequence completes, the script hands off to PX4 AUTO.LAND for descent and disarm.
 
 ### TL;DR
 
@@ -288,10 +288,10 @@ Take off, fly steady over the first tag, **let go of the sticks** when the LED g
 |---|---|
 | off | Searching for first tag (or aborted) |
 | purple | Tag detected, 2 s settle |
-| cyan | Centering or holding on a tag |
+| `detection_led_color` (default `cyan`) | Centering or holding on a tag |
 | yellow | Body-frame transit to next tag |
-| red | Final descent |
-| green | Landed and disarmed |
+| red | PX4 AUTO.LAND descending |
+| green | Landed and disarmed by PX4 |
 
 ### Why body-frame velocity instead of NED waypoints
 
@@ -315,11 +315,12 @@ PX4's EKF NED drifts on flow + IMU (we measured 1+ m of drift on a stationary ta
 | `transit_speed` | 0.20 | Body-frame velocity during TRANSIT (m/s) |
 | `centering_speed` | 0.20 | Body-frame velocity while chasing a tag in CENTERING (m/s) |
 | `min_transit_duration` | 1.0 | Minimum seconds in TRANSIT before allowing tag acquisition (forces visible body-frame motion when adjacent tags overlap in FoV) |
-| `transit_timeout` | 15.0 | Max seconds in TRANSIT before aborting to LANDING |
+| `transit_timeout` | 15.0 | Max seconds in TRANSIT before handing off to PX4 AUTO.LAND |
 | `centering_threshold` | 0.25 | Body-frame distance to declare centered (m) |
-| `tag_loss_grace` | 2.0 | Seconds the tag can be lost before resetting timers (and before AUTO.LAND hand-off during descent) |
+| `tag_loss_grace` | 2.0 | Seconds the tag can be lost before resetting CENTERING timers |
 | `min_takeoff_altitude` | 0.30 | Airborne gate — won't engage until above this (m) |
 | `detection_delay` | 2.0 | Settle window after first detection before engaging (s) |
+| `detection_led_color` | `cyan` | LED color while centering or holding on a tag |
 
 ### Coexistence with `dexi_offboard_manager`
 

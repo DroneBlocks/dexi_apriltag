@@ -48,16 +48,8 @@ class HopState(Enum):
     CENTERING = 3     # active centering on current target tag
     HOLDING = 4       # hover at locked tag NED for hover_duration
     TRANSIT = 5       # flying toward next tag at slow velocity
-    LANDING = 6       # OFFBOARD descent with vision corrections
-    AUTO_LANDING = 7  # handed off to PX4 AUTO.LAND (tag lost in descent)
-    LANDED = 8        # disarmed
-
-
-# Per-tag LED colors. Extend if you add more tags.
-TAG_COLORS = {
-    0: 'cyan',
-    1: 'cyan',
-}
+    AUTO_LANDING = 6  # PX4 AUTO.LAND handles descent + disarm
+    LANDED = 7        # disarmed
 
 
 class TagHop(Node):
@@ -78,15 +70,12 @@ class TagHop(Node):
         self.declare_parameter('min_transit_duration', 1.0)   # s minimum body-frame TRANSIT before allowing tag acquisition
         self.declare_parameter('centering_threshold', 0.25)   # m raw_magnitude to declare centered
         self.declare_parameter('centered_exit_threshold', 0.40)  # m hysteresis exit
-        self.declare_parameter('transit_timeout', 15.0)       # s max TRANSIT duration before aborting to LANDING
+        self.declare_parameter('transit_timeout', 15.0)       # s max TRANSIT duration before aborting to AUTO.LAND
         self.declare_parameter('detection_delay', 2.0)        # s settle after first detection
         self.declare_parameter('filter_length', 5)
-        self.declare_parameter('descent_rate', 0.30)          # m/s during LANDING
-        self.declare_parameter('final_descent_rate', 0.15)    # m/s below 0.5 m altitude
-        self.declare_parameter('landing_altitude', 0.15)      # m alt threshold for disarm
-        self.declare_parameter('landing_velocity_threshold', 0.05)
         self.declare_parameter('min_takeoff_altitude', 0.30)
         self.declare_parameter('tag_loss_grace', 2.0)         # s tag-loss before timer reset
+        self.declare_parameter('detection_led_color', 'cyan') # LED color while centering or holding on a tag
 
         self.tag_family = self.get_parameter('tag_family').value
         self.sequence = list(self.get_parameter('sequence').value)
@@ -109,12 +98,9 @@ class TagHop(Node):
         self.transit_timeout = self.get_parameter('transit_timeout').value
         self.detection_delay = self.get_parameter('detection_delay').value
         self.filter_length = self.get_parameter('filter_length').value
-        self.descent_rate = self.get_parameter('descent_rate').value
-        self.final_descent_rate = self.get_parameter('final_descent_rate').value
-        self.landing_altitude = self.get_parameter('landing_altitude').value
-        self.landing_velocity_threshold = self.get_parameter('landing_velocity_threshold').value
         self.min_takeoff_altitude = self.get_parameter('min_takeoff_altitude').value
         self.tag_loss_grace = self.get_parameter('tag_loss_grace').value
+        self.detection_led_color = self.get_parameter('detection_led_color').value
 
         # ----- ROS -----
         px4_qos = QoSProfile(
@@ -169,7 +155,6 @@ class TagHop(Node):
         self.target_y = None
         self.target_z = None  # locked altitude, captured on first CENTERING
         self.tag_loss_start = None
-        self.ground_contact_time = None
         self.aborted = False  # set on manual override; sticks until restart
 
         # Drone state
@@ -231,10 +216,6 @@ class TagHop(Node):
         if self.sequence_index < len(self.sequence):
             return self.sequence[self.sequence_index]
         return None
-
-    def current_target_color(self):
-        tid = self.current_target_tag_id()
-        return TAG_COLORS.get(tid, 'white')
 
     def transit_direction_body(self):
         """Body-frame unit vector to fly during the current TRANSIT leg.
@@ -413,19 +394,11 @@ class TagHop(Node):
         self.vehicle_command_pub.publish(msg)
         self.get_logger().info('AUTO.LAND mode command sent')
 
-    def send_disarm_command(self):
-        msg = VehicleCommand()
-        msg.timestamp = int(time.time() * 1e6)
-        msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
-        msg.param1 = 0.0
-        msg.param2 = 21196.0
-        msg.target_system = 1
-        msg.target_component = 1
-        msg.source_system = 1
-        msg.source_component = 1
-        msg.from_external = True
-        self.vehicle_command_pub.publish(msg)
-        self.get_logger().info('Disarm command sent')
+    def start_auto_landing(self):
+        """Hand off to PX4 AUTO.LAND for descent + disarm."""
+        self.set_led_color('red')
+        self.send_auto_land_mode_command()
+        self.state = HopState.AUTO_LANDING
 
     # ----- Main control loop -----
 
@@ -480,8 +453,8 @@ class TagHop(Node):
             elif time.time() - self.detection_time >= self.detection_delay:
                 self.get_logger().info(
                     f'Engaging on tag {self.current_target_tag_id()} '
-                    f'(LED {self.current_target_color()})')
-                self.set_led_color(self.current_target_color())
+                    f'(LED {self.detection_led_color})')
+                self.set_led_color(self.detection_led_color)
                 self.pause_offboard_setpoints(True, log=True)
                 self.send_offboard_mode_command()
                 self.offboard_requested = True
@@ -582,9 +555,8 @@ class TagHop(Node):
                 # Advance to next leg
                 self.sequence_index += 1
                 if self.sequence_index >= len(self.sequence):
-                    self.get_logger().info('Sequence complete. Beginning descent.')
-                    self.set_led_color('red')
-                    self.state = HopState.LANDING
+                    self.get_logger().info('Sequence complete. Handing off to PX4 AUTO.LAND.')
+                    self.start_auto_landing()
                 else:
                     next_tag = self.current_target_tag_id()
                     fwd, right = self.transit_direction_body()
@@ -618,7 +590,7 @@ class TagHop(Node):
                 self.get_logger().info(
                     f'Tag {self.current_target_tag_id()} acquired during '
                     f'transit ({elapsed:.1f}s in). Switching to CENTERING.')
-                self.set_led_color(self.current_target_color())
+                self.set_led_color(self.detection_led_color)
                 self.reset_tag_filter()
                 self.state = HopState.CENTERING
                 return
@@ -626,9 +598,8 @@ class TagHop(Node):
                 self.get_logger().error(
                     f'TRANSIT timed out after {elapsed:.1f}s — tag '
                     f'{self.current_target_tag_id()} never acquired. '
-                    f'Aborting to LANDING.')
-                self.set_led_color('red')
-                self.state = HopState.LANDING
+                    f'Handing off to PX4 AUTO.LAND.')
+                self.start_auto_landing()
                 return
             fwd, right = self.transit_direction_body()
             vx_body = fwd * self.transit_speed
@@ -640,62 +611,6 @@ class TagHop(Node):
                 throttle_duration_sec=1.0)
             self.send_position_setpoint(vx_body, vy_body, 0.0,
                                         fixed_z=self.target_z)
-
-        elif self.state == HopState.LANDING:
-            self.pause_offboard_setpoints(True)
-            descent = (self.final_descent_rate
-                       if self.current_altitude < 0.5 else self.descent_rate)
-            # Try to keep centering on whatever tag we last held over.
-            # If the tag has been lost for longer than tag_loss_grace, the
-            # camera is too close (or off-target) for vision corrections to
-            # help — hand off to PX4 AUTO.LAND. PX4's native landing logic
-            # handles ground effect and triggers vehicle_land_detected for
-            # disarm reliably; trying to push our own velocity setpoints at
-            # very low altitude leads to drift and hover-stalls.
-            if tag_found:
-                self.tag_loss_start = None
-                ex, ey = self.tag_x, self.tag_y
-                mag = math.sqrt(ex ** 2 + ey ** 2)
-                gain = 0.5
-                speed = min(mag * gain, 0.20) if mag > 0.02 else 0.0
-                vx = (ex / mag) * speed if mag > 0.02 else 0.0
-                vy = (ey / mag) * speed if mag > 0.02 else 0.0
-            else:
-                if self.tag_loss_start is None:
-                    self.tag_loss_start = time.time()
-                loss_duration = time.time() - self.tag_loss_start
-                if loss_duration > self.tag_loss_grace:
-                    self.get_logger().info(
-                        f'Tag lost {loss_duration:.1f}s during descent — '
-                        f'handing off to PX4 AUTO.LAND.')
-                    self.send_auto_land_mode_command()
-                    self.state = HopState.AUTO_LANDING
-                    return
-                vx = vy = 0.0
-                self.get_logger().warn('Tag lost during landing, descending straight',
-                                       throttle_duration_sec=1.0)
-            self.send_position_setpoint(vx, vy, descent)
-            self.get_logger().info(
-                f'Landing: alt={self.current_altitude:.2f}m vz_cmd={descent:.2f}',
-                throttle_duration_sec=0.5)
-
-            altitude_landed = (
-                self.current_altitude < self.landing_altitude
-                and abs(self.current_vz) < self.landing_velocity_threshold
-            )
-            if self.land_detected or altitude_landed:
-                if self.ground_contact_time is None:
-                    self.ground_contact_time = time.time()
-                    reason = 'PX4 land_detected' if self.land_detected else 'altitude+vz'
-                    self.get_logger().info(f'Ground contact ({reason}), confirming...')
-                elif time.time() - self.ground_contact_time > 0.5:
-                    self.get_logger().info('Landing confirmed! Disarming...')
-                    self.set_led_color('green')
-                    self.send_disarm_command()
-                    self.pause_offboard_setpoints(False, log=True)
-                    self.state = HopState.LANDED
-            else:
-                self.ground_contact_time = None
 
         elif self.state == HopState.AUTO_LANDING:
             # Hands off — PX4 owns the drone in AUTO.LAND. We do not publish
