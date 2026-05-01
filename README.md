@@ -268,16 +268,21 @@ Body-frame velocity navigation through a sequence of AprilTag waypoints. Drone t
 
 ### TL;DR
 
-Lay your tags in a line. Tell the script the order to visit them and how far apart they are.
+Lay your tags in a line. The default corridor is `0 → 2 → 4 → 2 → 0` with 2 m spacing along +N.
 
 ```bash
-ros2 run dexi_apriltag tag_hop.py --ros-args \
-  -p sequence:="[0, 2, 4, 2, 0]" \
-  -p tag_map_ids:="[0, 2, 4]" \
-  -p tag_map_n:="[0.0, 2.0, 4.0]" \
-  -p tag_map_e:="[0.0, 0.0, 0.0]" \
-  -p hover_duration:=10.0 \
-  -p transit_speed:=0.20
+ros2 launch dexi_apriltag tag_hop.launch.py
+```
+
+This brings up everything `tag_hop` needs:
+- `base_link → camera` static TF
+- `apriltag_odometry` (vision-corrected EKF — recommended for stable holds)
+- `tag_hop` itself
+
+For non-default corridor layouts (different sequence or spacing), copy `launch/tag_hop.launch.py` and edit the `sequence` / `tag_map_ids` / `tag_map_n` / `tag_map_e` constants. ROS2 launch substitutions don't support array params, so they're hardcoded in the launch file rather than CLI args. Scalar params (`hover_duration`, `transit_speed`, etc.) ARE launch args:
+
+```bash
+ros2 launch dexi_apriltag tag_hop.launch.py hover_duration:=5.0 transit_speed:=0.15
 ```
 
 Take off, fly steady over the first tag, **let go of the sticks** when the LED goes purple → cyan. The script flies the rest. RC mode flip aborts.
