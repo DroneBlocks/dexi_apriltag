@@ -76,7 +76,7 @@ class TagHop(Node):
         self.declare_parameter('min_takeoff_altitude', 0.30)
         self.declare_parameter('tag_loss_grace', 2.0)         # s tag-loss before timer reset
         self.declare_parameter('detection_led_color', 'cyan') # LED color while centering or holding on a tag
-        self.declare_parameter('yaw_rate_max', 0.25)          # rad/s slew limit during yaw alignment
+        self.declare_parameter('yaw_rate_max', 0.15)          # rad/s slew limit during yaw alignment
 
         self.tag_family = self.get_parameter('tag_family').value
         self.sequence = list(self.get_parameter('sequence').value)
@@ -596,10 +596,8 @@ class TagHop(Node):
                     self.get_logger().info(
                         f'Centered on tag {self.current_target_tag_id()} at '
                         f'NED [{self.target_x:.2f}, {self.target_y:.2f}, {self.target_z:.2f}]')
-                    # Now that we're centered, capture the corridor yaw and
-                    # initialize the slew-limited setpoint at the current
-                    # heading. Rotation will then happen around camera center
-                    # while position-held — tag stays in FoV during the turn.
+                    # Now that we're centered, capture initial yaw target and
+                    # initialize slew-limited setpoint at the current heading.
                     if self.target_yaw is None:
                         self.target_yaw, beta = self.compute_target_yaw_from_tag()
                         if self.target_yaw is not None:
@@ -611,6 +609,13 @@ class TagHop(Node):
                                 f'tag-rel β: {math.degrees(beta):.1f}°, '
                                 f'rate cap {math.degrees(self.yaw_rate_max):.0f}°/s)')
                 else:
+                    # Closed-loop yaw track: re-read tag rotation each cycle
+                    # and update target_yaw. Compensates for noisy single-shot
+                    # β reads and PX4 yaw controller overshoot — drone
+                    # converges to actual tag-up direction.
+                    new_yaw, _ = self.compute_target_yaw_from_tag()
+                    if new_yaw is not None:
+                        self.target_yaw = new_yaw
                     # During yaw alignment, snap target to the live tag
                     # observation so EKF drift during rotation gets corrected
                     # each cycle. Once aligned, fall back to filtered tracking.
