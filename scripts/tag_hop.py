@@ -275,10 +275,14 @@ class TagHop(Node):
             diff += 2 * math.pi
         return diff
 
-    def advance_commanded_yaw(self, dt=0.05):
-        """Slew-limited yaw setpoint. Called once per setpoint publish."""
+    def advance_commanded_yaw(self, advance=True, dt=0.05):
+        """Slew-limited yaw setpoint. advance=False freezes the setpoint —
+        used when tag is lost so we don't keep rotating without visual
+        confirmation."""
         if self.target_yaw is None or self.commanded_yaw is None:
             return None
+        if not advance:
+            return self.commanded_yaw
         diff = self.target_yaw - self.commanded_yaw
         while diff > math.pi:
             diff -= 2 * math.pi
@@ -387,13 +391,13 @@ class TagHop(Node):
         self.offboard_mode_pub.publish(msg)
         self.pause_offboard_setpoints(True)
 
-    def send_hold_position(self, target_x, target_y, target_z):
+    def send_hold_position(self, target_x, target_y, target_z, advance_yaw=True):
         msg = TrajectorySetpoint()
         msg.timestamp = int(time.time() * 1e6)
         msg.position = [float(target_x), float(target_y), float(target_z)]
         msg.velocity = [0.0, 0.0, 0.0]
         msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        yaw_cmd = self.advance_commanded_yaw()
+        yaw_cmd = self.advance_commanded_yaw(advance=advance_yaw)
         msg.yaw = float(yaw_cmd) if yaw_cmd is not None else float('nan')
         msg.yawspeed = 0.0
         self.setpoint_pub.publish(msg)
@@ -542,7 +546,10 @@ class TagHop(Node):
                 hx = self.target_x if self.target_x is not None else self.drone_x
                 hy = self.target_y if self.target_y is not None else self.drone_y
                 hz = self.target_z if self.target_z is not None else self.drone_z
-                self.send_hold_position(hx, hy, hz)
+                # Freeze yaw advancement during tag loss — keep rotating
+                # blindly compounds drift and pushes the tag farther from
+                # the FoV's recovery zone.
+                self.send_hold_position(hx, hy, hz, advance_yaw=False)
                 if loss_duration > self.tag_loss_grace:
                     self.centered_since = None
                 return
@@ -580,7 +587,12 @@ class TagHop(Node):
                                 f'error: {math.degrees(self.yaw_error()):.1f}°, '
                                 f'rate cap {math.degrees(self.yaw_rate_max):.0f}°/s)')
                 else:
-                    alpha = 0.8
+                    # During yaw alignment, snap target to the live tag
+                    # observation so EKF drift during rotation gets corrected
+                    # each cycle. Once aligned, fall back to filtered tracking.
+                    yaw_aligning = (self.target_yaw is not None
+                                    and abs(self.yaw_error()) >= self.yaw_tolerance)
+                    alpha = 0.0 if yaw_aligning else 0.8
                     self.target_x = alpha * self.target_x + (1.0 - alpha) * new_target_x
                     self.target_y = alpha * self.target_y + (1.0 - alpha) * new_target_y
                 # Transition to HOLDING the moment we're stably centered AND
