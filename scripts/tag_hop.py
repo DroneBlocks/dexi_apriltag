@@ -3,14 +3,21 @@
 Tag-hop corridor navigator.
 
 Drone flies a sequence of AprilTag waypoints (e.g. [0, 2, 4, 2, 0]):
-takeoff over the first tag → center → hold → body-frame velocity transit
-forward/backward to next tag → repeat → AUTO.LAND when sequence finishes.
+takeoff over the first tag → center → yaw-align to tag's up-edge → hold
+→ body-frame velocity transit to next tag → repeat → AUTO.LAND when
+sequence finishes.
 
 Why body-frame velocity instead of NED setpoints: PX4's EKF NED drifts on
 flow + IMU, so NED-target setpoints fight a moving estimate. Body-frame
 velocity uses gyro+accel attitude (very accurate) — drone moves in real
 world regardless of EKF position state. Vision (TF for the next tag in
 the sequence) decides arrival, not EKF distance.
+
+Yaw alignment (Approach A): on first centering, the drone reads the tag's
+own rotation from TF and rotates body-forward to match the tag's printed
+up-edge. Closed-loop: target_yaw recomputes each cycle from the visible
+tag, so PX4 controller noise self-corrects. Robust to EKF heading bias —
+the correction is purely body-relative (what the camera sees).
 
 LED sequence: off → purple (settle) → cyan (centered/hold) → yellow
 (transit) → red (descent) → green (landed).
@@ -179,12 +186,10 @@ class TagHop(Node):
         self.tag_x_buffer = deque(maxlen=self.filter_length)
         self.tag_y_buffer = deque(maxlen=self.filter_length)
 
-        # Approach A yaw alignment: NED yaw to align body-forward with the
-        # first corridor leg. Captured once the drone is first centered over
-        # the starting tag (not at engagement) so rotation happens around
-        # camera center while position-held — keeps tag in FoV during the
-        # rotation. commanded_yaw slew-limits the setpoint so PX4's yaw
-        # controller doesn't see a step input and overshoot.
+        # Yaw alignment state. target_yaw is the live setpoint (recomputed
+        # from the visible tag every CENTERING cycle); commanded_yaw is the
+        # slew-limited intermediate that PX4 sees, so the controller never
+        # gets a step input.
         self.target_yaw = None
         self.commanded_yaw = None
         self.yaw_tolerance = math.radians(5.0)
@@ -232,11 +237,11 @@ class TagHop(Node):
     def transit_direction_body(self):
         """Body-frame unit vector to fly during the current TRANSIT leg.
 
-        Computed from the tag_map delta (prev tag -> next tag). Assumes the
-        drone's body-forward is aligned with tag_map +N — i.e., the user
-        physically positioned the drone facing the +N direction of the
-        tag_map at takeoff, and tags share that orientation. For arbitrary
-        headings or non-axis-aligned tags, add yaw alignment to CENTERING.
+        Computed from the tag_map delta (prev tag -> next tag). The yaw
+        alignment in CENTERING ensures body-forward is aligned with the
+        tag's up-edge, so the tag_map +N direction maps directly onto
+        body-forward as long as the user lays tags with up-edges along
+        the same direction the tag_map encodes.
         """
         if self.sequence_index <= 0 or self.sequence_index >= len(self.sequence):
             return 0.0, 0.0
@@ -252,14 +257,12 @@ class TagHop(Node):
         return delta_n / mag, delta_e / mag
 
     def compute_target_yaw_from_tag(self):
-        """NED yaw to align body-forward with the tag's printed up-edge.
+        """NED yaw to align body-forward with the visible tag's up-edge.
 
-        Reads the base_link → tag TF rotation, expresses tag's local +Y axis
-        (the up-edge) in body coordinates, and returns drone_heading + the
-        body-frame angle to that direction. Robust to EKF heading offsets:
-        any constant bias between EKF heading and real-world heading cancels
-        because the correction is purely body-relative — what the camera sees,
-        not what NED claims.
+        Returns (target_yaw, beta) where beta is the body-frame angle from
+        forward to tag-up. drone_heading + beta gives the absolute setpoint;
+        the addition cancels any constant EKF heading bias because beta is
+        purely body-relative.
         """
         tid = self.current_target_tag_id()
         if tid is None:
@@ -272,15 +275,13 @@ class TagHop(Node):
         except Exception:
             return None, None
         q = t.transform.rotation
-        # Tag's +Y axis (up-edge) rotated by q into base_link's TF-native frame.
-        v_x = 2 * (q.x * q.y - q.w * q.z)
+        # Rotate tag's local +Y axis (the up-edge) by q to express it in
+        # base_link's TF-native frame, then remap to body FRD using the
+        # same convention as get_tag_position(): body_fwd = -v_y,
+        # body_right = -v_z.
         v_y = 1 - 2 * (q.x * q.x + q.z * q.z)
         v_z = 2 * (q.y * q.z + q.w * q.x)
-        # Map TF-native to body FRD using the same convention as
-        # get_tag_position(): body_fwd = -v_y, body_right = -v_z.
-        body_fwd = -v_y
-        body_right = -v_z
-        beta = math.atan2(body_right, body_fwd)
+        beta = math.atan2(-v_z, -v_y)
         target = self.drone_heading + beta
         while target > math.pi:
             target -= 2 * math.pi
@@ -299,9 +300,9 @@ class TagHop(Node):
         return diff
 
     def advance_commanded_yaw(self, advance=True, dt=0.05):
-        """Slew-limited yaw setpoint. advance=False freezes the setpoint —
-        used when tag is lost so we don't keep rotating without visual
-        confirmation."""
+        """Slew-limited yaw setpoint, advanced once per setpoint publish.
+        advance=False freezes it — used during tag loss so the drone
+        doesn't keep rotating without visual confirmation."""
         if self.target_yaw is None or self.commanded_yaw is None:
             return None
         if not advance:
@@ -569,9 +570,8 @@ class TagHop(Node):
                 hx = self.target_x if self.target_x is not None else self.drone_x
                 hy = self.target_y if self.target_y is not None else self.drone_y
                 hz = self.target_z if self.target_z is not None else self.drone_z
-                # Freeze yaw advancement during tag loss — keep rotating
-                # blindly compounds drift and pushes the tag farther from
-                # the FoV's recovery zone.
+                # Freeze yaw during tag loss — rotating blindly pushes the
+                # tag farther from the recovery zone.
                 self.send_hold_position(hx, hy, hz, advance_yaw=False)
                 if loss_duration > self.tag_loss_grace:
                     self.centered_since = None
@@ -596,8 +596,6 @@ class TagHop(Node):
                     self.get_logger().info(
                         f'Centered on tag {self.current_target_tag_id()} at '
                         f'NED [{self.target_x:.2f}, {self.target_y:.2f}, {self.target_z:.2f}]')
-                    # Now that we're centered, capture initial yaw target and
-                    # initialize slew-limited setpoint at the current heading.
                     if self.target_yaw is None:
                         self.target_yaw, beta = self.compute_target_yaw_from_tag()
                         if self.target_yaw is not None:
@@ -609,25 +607,23 @@ class TagHop(Node):
                                 f'tag-rel β: {math.degrees(beta):.1f}°, '
                                 f'rate cap {math.degrees(self.yaw_rate_max):.0f}°/s)')
                 else:
-                    # Closed-loop yaw track: re-read tag rotation each cycle
-                    # and update target_yaw. Compensates for noisy single-shot
-                    # β reads and PX4 yaw controller overshoot — drone
-                    # converges to actual tag-up direction.
+                    # Closed-loop: target_yaw chases the visible tag's actual
+                    # up-edge each cycle, so β-noise and PX4 controller
+                    # overshoot self-correct.
                     new_yaw, _ = self.compute_target_yaw_from_tag()
                     if new_yaw is not None:
                         self.target_yaw = new_yaw
-                    # During yaw alignment, snap target to the live tag
-                    # observation so EKF drift during rotation gets corrected
-                    # each cycle. Once aligned, fall back to filtered tracking.
+                    # Snap target_x/y to live observation while yaw is still
+                    # rotating, since EKF drifts under flow-only rotation.
+                    # Once aligned, fall back to filtered tracking.
                     yaw_aligning = (self.target_yaw is not None
                                     and abs(self.yaw_error()) >= self.yaw_tolerance)
                     alpha = 0.0 if yaw_aligning else 0.8
                     self.target_x = alpha * self.target_x + (1.0 - alpha) * new_target_x
                     self.target_y = alpha * self.target_y + (1.0 - alpha) * new_target_y
-                # Transition to HOLDING the moment we're stably centered AND
-                # yaw is within tolerance. Body-frame TRANSIT semantics depend
-                # on a known yaw — without this gate the drone could enter
-                # TRANSIT mid-rotation and fly along a curving path.
+                # HOLDING gate: TRANSIT semantics depend on a known yaw,
+                # so don't enter HOLDING (and thus the next TRANSIT) until
+                # yaw error is within tolerance.
                 yaw_ok = (self.target_yaw is None
                           or abs(self.yaw_error()) < self.yaw_tolerance)
                 if time.time() - self.centered_since >= 1.0 and yaw_ok:
