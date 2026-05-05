@@ -177,6 +177,13 @@ class TagHop(Node):
         self.tag_x_buffer = deque(maxlen=self.filter_length)
         self.tag_y_buffer = deque(maxlen=self.filter_length)
 
+        # Approach A yaw alignment: NED yaw to align body-forward with the
+        # first corridor leg. Captured once at engagement, held through the
+        # rest of the sequence so all subsequent body-frame TRANSITs depart
+        # from a known orientation. Single-tag sequences leave it None.
+        self.target_yaw = None
+        self.yaw_tolerance = math.radians(5.0)
+
         # ----- Timers -----
         self.control_timer = self.create_timer(0.05, self.control_loop)   # 20 Hz
         self.heartbeat_timer = self.create_timer(0.1, self.send_heartbeat)  # 10 Hz
@@ -238,6 +245,30 @@ class TagHop(Node):
         if mag < 1e-6:
             return 0.0, 0.0
         return delta_n / mag, delta_e / mag
+
+    def compute_corridor_yaw(self):
+        """NED yaw to align body-forward with current → next tag direction."""
+        if self.sequence_index + 1 >= len(self.sequence):
+            return None
+        cur_tag = self.sequence[self.sequence_index]
+        next_tag = self.sequence[self.sequence_index + 1]
+        cur_n, cur_e = self.tag_map[cur_tag]
+        next_n, next_e = self.tag_map[next_tag]
+        dn = next_n - cur_n
+        de = next_e - cur_e
+        if math.sqrt(dn * dn + de * de) < 1e-6:
+            return None
+        return math.atan2(de, dn)
+
+    def yaw_error(self):
+        if self.target_yaw is None:
+            return 0.0
+        diff = self.target_yaw - self.drone_heading
+        while diff > math.pi:
+            diff -= 2 * math.pi
+        while diff < -math.pi:
+            diff += 2 * math.pi
+        return diff
 
     def get_tag_position(self):
         """TF lookup for the CURRENT target tag. Sets self.tag_x/y/z (body frame)."""
@@ -337,7 +368,8 @@ class TagHop(Node):
         msg.position = [float(target_x), float(target_y), float(target_z)]
         msg.velocity = [0.0, 0.0, 0.0]
         msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        msg.yaw = float('nan')
+        msg.yaw = (float(self.target_yaw) if self.target_yaw is not None
+                   else float('nan'))
         msg.yawspeed = 0.0
         self.setpoint_pub.publish(msg)
 
@@ -361,7 +393,8 @@ class TagHop(Node):
             msg.position = [float(target_x), float(target_y), float(target_z)]
             msg.velocity = [vx_ned, vy_ned, vz]
         msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        msg.yaw = float('nan')
+        msg.yaw = (float(self.target_yaw) if self.target_yaw is not None
+                   else float('nan'))
         msg.yawspeed = 0.0
         self.setpoint_pub.publish(msg)
 
@@ -415,6 +448,7 @@ class TagHop(Node):
                 self.aborted = False
                 self.was_in_offboard = False
                 self.offboard_requested = False
+                self.target_yaw = None
                 self.state = HopState.LANDED
                 self.set_led_color('black')
             return
@@ -464,9 +498,15 @@ class TagHop(Node):
                 self.target_y = None
                 self.centered_since = None
                 self.tag_loss_start = None
+                self.target_yaw = self.compute_corridor_yaw()
                 self.state = HopState.CENTERING
                 self.get_logger().info(
                     f'Locked target altitude: {-self.target_z:.2f} m')
+                if self.target_yaw is not None:
+                    self.get_logger().info(
+                        f'Yaw target: {math.degrees(self.target_yaw):.1f}° '
+                        f'(current heading: {math.degrees(self.drone_heading):.1f}°, '
+                        f'error: {math.degrees(self.yaw_error()):.1f}°)')
             else:
                 self.send_position_setpoint(0.0, 0.0, 0.0)
 
@@ -510,13 +550,22 @@ class TagHop(Node):
                     alpha = 0.8
                     self.target_x = alpha * self.target_x + (1.0 - alpha) * new_target_x
                     self.target_y = alpha * self.target_y + (1.0 - alpha) * new_target_y
-                # Transition to HOLDING the moment we're stably centered
-                if time.time() - self.centered_since >= 1.0:
+                # Transition to HOLDING the moment we're stably centered AND
+                # yaw is within tolerance. Body-frame TRANSIT semantics depend
+                # on a known yaw — without this gate the drone could enter
+                # TRANSIT mid-rotation and fly along a curving path.
+                yaw_ok = (self.target_yaw is None
+                          or abs(self.yaw_error()) < self.yaw_tolerance)
+                if time.time() - self.centered_since >= 1.0 and yaw_ok:
                     self.get_logger().info(
                         f'Holding tag {self.current_target_tag_id()} for '
                         f'{self.hover_duration:.0f}s')
                     self.hold_start_time = time.time()
                     self.state = HopState.HOLDING
+                elif not yaw_ok:
+                    self.get_logger().info(
+                        f'Yaw aligning: error={math.degrees(self.yaw_error()):.1f}°',
+                        throttle_duration_sec=1.0)
                 self.send_hold_position(self.target_x, self.target_y, self.target_z)
             else:
                 # Not centered — chase the tag at slow speed
@@ -646,6 +695,7 @@ class TagHop(Node):
                 self.reset_tag_filter()
                 self.was_in_offboard = False
                 self.offboard_requested = False
+                self.target_yaw = None
             else:
                 self.get_logger().info('Landed and disarmed.', throttle_duration_sec=2.0)
 
