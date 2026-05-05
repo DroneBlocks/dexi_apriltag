@@ -76,7 +76,7 @@ class TagHop(Node):
         self.declare_parameter('min_takeoff_altitude', 0.30)
         self.declare_parameter('tag_loss_grace', 2.0)         # s tag-loss before timer reset
         self.declare_parameter('detection_led_color', 'cyan') # LED color while centering or holding on a tag
-        self.declare_parameter('yaw_rate_max', 0.5)           # rad/s slew limit during yaw alignment
+        self.declare_parameter('yaw_rate_max', 0.25)          # rad/s slew limit during yaw alignment
 
         self.tag_family = self.get_parameter('tag_family').value
         self.sequence = list(self.get_parameter('sequence').value)
