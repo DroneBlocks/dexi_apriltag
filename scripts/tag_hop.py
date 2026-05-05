@@ -251,19 +251,42 @@ class TagHop(Node):
             return 0.0, 0.0
         return delta_n / mag, delta_e / mag
 
-    def compute_corridor_yaw(self):
-        """NED yaw to align body-forward with current → next tag direction."""
-        if self.sequence_index + 1 >= len(self.sequence):
-            return None
-        cur_tag = self.sequence[self.sequence_index]
-        next_tag = self.sequence[self.sequence_index + 1]
-        cur_n, cur_e = self.tag_map[cur_tag]
-        next_n, next_e = self.tag_map[next_tag]
-        dn = next_n - cur_n
-        de = next_e - cur_e
-        if math.sqrt(dn * dn + de * de) < 1e-6:
-            return None
-        return math.atan2(de, dn)
+    def compute_target_yaw_from_tag(self):
+        """NED yaw to align body-forward with the tag's printed up-edge.
+
+        Reads the base_link → tag TF rotation, expresses tag's local +Y axis
+        (the up-edge) in body coordinates, and returns drone_heading + the
+        body-frame angle to that direction. Robust to EKF heading offsets:
+        any constant bias between EKF heading and real-world heading cancels
+        because the correction is purely body-relative — what the camera sees,
+        not what NED claims.
+        """
+        tid = self.current_target_tag_id()
+        if tid is None:
+            return None, None
+        tag_frame = f'{self.tag_family}:{tid}'
+        try:
+            t = self.tf_buffer.lookup_transform(
+                'base_link', tag_frame, rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.05))
+        except Exception:
+            return None, None
+        q = t.transform.rotation
+        # Tag's +Y axis (up-edge) rotated by q into base_link's TF-native frame.
+        v_x = 2 * (q.x * q.y - q.w * q.z)
+        v_y = 1 - 2 * (q.x * q.x + q.z * q.z)
+        v_z = 2 * (q.y * q.z + q.w * q.x)
+        # Map TF-native to body FRD using the same convention as
+        # get_tag_position(): body_fwd = -v_y, body_right = -v_z.
+        body_fwd = -v_y
+        body_right = -v_z
+        beta = math.atan2(body_right, body_fwd)
+        target = self.drone_heading + beta
+        while target > math.pi:
+            target -= 2 * math.pi
+        while target < -math.pi:
+            target += 2 * math.pi
+        return target, beta
 
     def yaw_error(self):
         if self.target_yaw is None:
@@ -578,13 +601,14 @@ class TagHop(Node):
                     # heading. Rotation will then happen around camera center
                     # while position-held — tag stays in FoV during the turn.
                     if self.target_yaw is None:
-                        self.target_yaw = self.compute_corridor_yaw()
+                        self.target_yaw, beta = self.compute_target_yaw_from_tag()
                         if self.target_yaw is not None:
                             self.commanded_yaw = self.drone_heading
                             self.get_logger().info(
                                 f'Yaw target: {math.degrees(self.target_yaw):.1f}° '
                                 f'(current: {math.degrees(self.drone_heading):.1f}°, '
                                 f'error: {math.degrees(self.yaw_error()):.1f}°, '
+                                f'tag-rel β: {math.degrees(beta):.1f}°, '
                                 f'rate cap {math.degrees(self.yaw_rate_max):.0f}°/s)')
                 else:
                     # During yaw alignment, snap target to the live tag
