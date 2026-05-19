@@ -3,8 +3,9 @@
 Tag-hop corridor navigator.
 
 Drone flies a sequence of AprilTag waypoints (e.g. [0, 2, 4, 2, 0]):
-takeoff over the first tag → center → hold → body-frame velocity transit
-forward/backward to next tag → repeat → AUTO.LAND when sequence finishes.
+takeoff over the first tag → center → yaw-align to tag's up-edge → hold
+→ body-frame velocity transit to next tag → repeat → AUTO.LAND when
+sequence finishes.
 
 Why body-frame velocity instead of NED setpoints: PX4's EKF NED drifts on
 flow + IMU, so NED-target setpoints fight a moving estimate. Body-frame
@@ -12,8 +13,14 @@ velocity uses gyro+accel attitude (very accurate) — drone moves in real
 world regardless of EKF position state. Vision (TF for the next tag in
 the sequence) decides arrival, not EKF distance.
 
-LED sequence: off → purple (settle) → cyan (centered/hold) → yellow
-(transit) → red (descent) → green (landed).
+Yaw alignment (Approach A): on first centering, the drone reads the tag's
+own rotation from TF and rotates body-forward to match the tag's printed
+up-edge. Closed-loop: target_yaw recomputes each cycle from the visible
+tag, so PX4 controller noise self-corrects. Robust to EKF heading bias —
+the correction is purely body-relative (what the camera sees).
+
+LED sequence: off → purple (settle) → cyan (centering) → white (locked
+in HOLDING) → yellow (transit) → red (descent) → green (landed).
 
 Manual override: any RC mode flip away from OFFBOARD triggers a sticky
 abort. Land manually, take off again, sequence re-engages automatically.
@@ -75,7 +82,9 @@ class TagHop(Node):
         self.declare_parameter('filter_length', 5)
         self.declare_parameter('min_takeoff_altitude', 0.30)
         self.declare_parameter('tag_loss_grace', 2.0)         # s tag-loss before timer reset
-        self.declare_parameter('detection_led_color', 'cyan') # LED color while centering or holding on a tag
+        self.declare_parameter('detection_led_color', 'cyan') # LED color during CENTERING (acquiring/chasing the tag)
+        self.declare_parameter('lock_led_color', 'white')     # LED color during HOLDING (locked on tag)
+        self.declare_parameter('yaw_rate_max', 0.15)          # rad/s slew limit during yaw alignment
 
         self.tag_family = self.get_parameter('tag_family').value
         self.sequence = list(self.get_parameter('sequence').value)
@@ -101,6 +110,8 @@ class TagHop(Node):
         self.min_takeoff_altitude = self.get_parameter('min_takeoff_altitude').value
         self.tag_loss_grace = self.get_parameter('tag_loss_grace').value
         self.detection_led_color = self.get_parameter('detection_led_color').value
+        self.lock_led_color = self.get_parameter('lock_led_color').value
+        self.yaw_rate_max = self.get_parameter('yaw_rate_max').value
 
         # ----- ROS -----
         px4_qos = QoSProfile(
@@ -177,6 +188,14 @@ class TagHop(Node):
         self.tag_x_buffer = deque(maxlen=self.filter_length)
         self.tag_y_buffer = deque(maxlen=self.filter_length)
 
+        # Yaw alignment state. target_yaw is the live setpoint (recomputed
+        # from the visible tag every CENTERING cycle); commanded_yaw is the
+        # slew-limited intermediate that PX4 sees, so the controller never
+        # gets a step input.
+        self.target_yaw = None
+        self.commanded_yaw = None
+        self.yaw_tolerance = math.radians(5.0)
+
         # ----- Timers -----
         self.control_timer = self.create_timer(0.05, self.control_loop)   # 20 Hz
         self.heartbeat_timer = self.create_timer(0.1, self.send_heartbeat)  # 10 Hz
@@ -220,11 +239,11 @@ class TagHop(Node):
     def transit_direction_body(self):
         """Body-frame unit vector to fly during the current TRANSIT leg.
 
-        Computed from the tag_map delta (prev tag -> next tag). Assumes the
-        drone's body-forward is aligned with tag_map +N — i.e., the user
-        physically positioned the drone facing the +N direction of the
-        tag_map at takeoff, and tags share that orientation. For arbitrary
-        headings or non-axis-aligned tags, add yaw alignment to CENTERING.
+        Computed from the tag_map delta (prev tag -> next tag). The yaw
+        alignment in CENTERING ensures body-forward is aligned with the
+        tag's up-edge, so the tag_map +N direction maps directly onto
+        body-forward as long as the user lays tags with up-edges along
+        the same direction the tag_map encodes.
         """
         if self.sequence_index <= 0 or self.sequence_index >= len(self.sequence):
             return 0.0, 0.0
@@ -238,6 +257,73 @@ class TagHop(Node):
         if mag < 1e-6:
             return 0.0, 0.0
         return delta_n / mag, delta_e / mag
+
+    def compute_target_yaw_from_tag(self):
+        """NED yaw to align body-forward with the visible tag's up-edge.
+
+        Returns (target_yaw, beta) where beta is the body-frame angle from
+        forward to tag-up. drone_heading + beta gives the absolute setpoint;
+        the addition cancels any constant EKF heading bias because beta is
+        purely body-relative.
+        """
+        tid = self.current_target_tag_id()
+        if tid is None:
+            return None, None
+        tag_frame = f'{self.tag_family}:{tid}'
+        try:
+            t = self.tf_buffer.lookup_transform(
+                'base_link', tag_frame, rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.05))
+        except Exception:
+            return None, None
+        q = t.transform.rotation
+        # Rotate tag's local +Y axis (the up-edge) by q to express it in
+        # base_link's TF-native frame, then remap to body FRD using the
+        # same convention as get_tag_position(): body_fwd = -v_y,
+        # body_right = -v_z.
+        v_y = 1 - 2 * (q.x * q.x + q.z * q.z)
+        v_z = 2 * (q.y * q.z + q.w * q.x)
+        beta = math.atan2(-v_z, -v_y)
+        target = self.drone_heading + beta
+        while target > math.pi:
+            target -= 2 * math.pi
+        while target < -math.pi:
+            target += 2 * math.pi
+        return target, beta
+
+    def yaw_error(self):
+        if self.target_yaw is None:
+            return 0.0
+        diff = self.target_yaw - self.drone_heading
+        while diff > math.pi:
+            diff -= 2 * math.pi
+        while diff < -math.pi:
+            diff += 2 * math.pi
+        return diff
+
+    def advance_commanded_yaw(self, advance=True, dt=0.05):
+        """Slew-limited yaw setpoint, advanced once per setpoint publish.
+        advance=False freezes it — used during tag loss so the drone
+        doesn't keep rotating without visual confirmation."""
+        if self.target_yaw is None or self.commanded_yaw is None:
+            return None
+        if not advance:
+            return self.commanded_yaw
+        diff = self.target_yaw - self.commanded_yaw
+        while diff > math.pi:
+            diff -= 2 * math.pi
+        while diff < -math.pi:
+            diff += 2 * math.pi
+        max_step = self.yaw_rate_max * dt
+        if abs(diff) > max_step:
+            self.commanded_yaw += math.copysign(max_step, diff)
+        else:
+            self.commanded_yaw = self.target_yaw
+        while self.commanded_yaw > math.pi:
+            self.commanded_yaw -= 2 * math.pi
+        while self.commanded_yaw < -math.pi:
+            self.commanded_yaw += 2 * math.pi
+        return self.commanded_yaw
 
     def get_tag_position(self):
         """TF lookup for the CURRENT target tag. Sets self.tag_x/y/z (body frame)."""
@@ -331,13 +417,14 @@ class TagHop(Node):
         self.offboard_mode_pub.publish(msg)
         self.pause_offboard_setpoints(True)
 
-    def send_hold_position(self, target_x, target_y, target_z):
+    def send_hold_position(self, target_x, target_y, target_z, advance_yaw=True):
         msg = TrajectorySetpoint()
         msg.timestamp = int(time.time() * 1e6)
         msg.position = [float(target_x), float(target_y), float(target_z)]
         msg.velocity = [0.0, 0.0, 0.0]
         msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        msg.yaw = float('nan')
+        yaw_cmd = self.advance_commanded_yaw(advance=advance_yaw)
+        msg.yaw = float(yaw_cmd) if yaw_cmd is not None else float('nan')
         msg.yawspeed = 0.0
         self.setpoint_pub.publish(msg)
 
@@ -361,7 +448,8 @@ class TagHop(Node):
             msg.position = [float(target_x), float(target_y), float(target_z)]
             msg.velocity = [vx_ned, vy_ned, vz]
         msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        msg.yaw = float('nan')
+        yaw_cmd = self.advance_commanded_yaw()
+        msg.yaw = float(yaw_cmd) if yaw_cmd is not None else float('nan')
         msg.yawspeed = 0.0
         self.setpoint_pub.publish(msg)
 
@@ -415,6 +503,8 @@ class TagHop(Node):
                 self.aborted = False
                 self.was_in_offboard = False
                 self.offboard_requested = False
+                self.target_yaw = None
+                self.commanded_yaw = None
                 self.state = HopState.LANDED
                 self.set_led_color('black')
             return
@@ -482,7 +572,9 @@ class TagHop(Node):
                 hx = self.target_x if self.target_x is not None else self.drone_x
                 hy = self.target_y if self.target_y is not None else self.drone_y
                 hz = self.target_z if self.target_z is not None else self.drone_z
-                self.send_hold_position(hx, hy, hz)
+                # Freeze yaw during tag loss — rotating blindly pushes the
+                # tag farther from the recovery zone.
+                self.send_hold_position(hx, hy, hz, advance_yaw=False)
                 if loss_duration > self.tag_loss_grace:
                     self.centered_since = None
                 return
@@ -506,17 +598,47 @@ class TagHop(Node):
                     self.get_logger().info(
                         f'Centered on tag {self.current_target_tag_id()} at '
                         f'NED [{self.target_x:.2f}, {self.target_y:.2f}, {self.target_z:.2f}]')
+                    if self.target_yaw is None:
+                        self.target_yaw, beta = self.compute_target_yaw_from_tag()
+                        if self.target_yaw is not None:
+                            self.commanded_yaw = self.drone_heading
+                            self.get_logger().info(
+                                f'Yaw target: {math.degrees(self.target_yaw):.1f}° '
+                                f'(current: {math.degrees(self.drone_heading):.1f}°, '
+                                f'error: {math.degrees(self.yaw_error()):.1f}°, '
+                                f'tag-rel β: {math.degrees(beta):.1f}°, '
+                                f'rate cap {math.degrees(self.yaw_rate_max):.0f}°/s)')
                 else:
-                    alpha = 0.8
+                    # Closed-loop: target_yaw chases the visible tag's actual
+                    # up-edge each cycle, so β-noise and PX4 controller
+                    # overshoot self-correct.
+                    new_yaw, _ = self.compute_target_yaw_from_tag()
+                    if new_yaw is not None:
+                        self.target_yaw = new_yaw
+                    # Snap target_x/y to live observation while yaw is still
+                    # rotating, since EKF drifts under flow-only rotation.
+                    # Once aligned, fall back to filtered tracking.
+                    yaw_aligning = (self.target_yaw is not None
+                                    and abs(self.yaw_error()) >= self.yaw_tolerance)
+                    alpha = 0.0 if yaw_aligning else 0.8
                     self.target_x = alpha * self.target_x + (1.0 - alpha) * new_target_x
                     self.target_y = alpha * self.target_y + (1.0 - alpha) * new_target_y
-                # Transition to HOLDING the moment we're stably centered
-                if time.time() - self.centered_since >= 1.0:
+                # HOLDING gate: TRANSIT semantics depend on a known yaw,
+                # so don't enter HOLDING (and thus the next TRANSIT) until
+                # yaw error is within tolerance.
+                yaw_ok = (self.target_yaw is None
+                          or abs(self.yaw_error()) < self.yaw_tolerance)
+                if time.time() - self.centered_since >= 1.0 and yaw_ok:
                     self.get_logger().info(
                         f'Holding tag {self.current_target_tag_id()} for '
-                        f'{self.hover_duration:.0f}s')
+                        f'{self.hover_duration:.0f}s (LED {self.lock_led_color})')
+                    self.set_led_color(self.lock_led_color)
                     self.hold_start_time = time.time()
                     self.state = HopState.HOLDING
+                elif not yaw_ok:
+                    self.get_logger().info(
+                        f'Yaw aligning: error={math.degrees(self.yaw_error()):.1f}°',
+                        throttle_duration_sec=1.0)
                 self.send_hold_position(self.target_x, self.target_y, self.target_z)
             else:
                 # Not centered — chase the tag at slow speed
@@ -547,6 +669,12 @@ class TagHop(Node):
                 alpha = 0.9
                 self.target_x = alpha * self.target_x + (1.0 - alpha) * new_target_x
                 self.target_y = alpha * self.target_y + (1.0 - alpha) * new_target_y
+                # Closed-loop yaw also runs in HOLDING — without it, PX4 yaw
+                # drifts during long hovers and the tag appears rotated in
+                # the camera frame even though the drone thinks it's locked.
+                new_yaw, _ = self.compute_target_yaw_from_tag()
+                if new_yaw is not None:
+                    self.target_yaw = new_yaw
             self.send_hold_position(self.target_x, self.target_y, self.target_z)
             self.get_logger().info(
                 f'Hold tag {self.current_target_tag_id()}: {self.hover_duration - elapsed:.1f}s left',
@@ -646,6 +774,8 @@ class TagHop(Node):
                 self.reset_tag_filter()
                 self.was_in_offboard = False
                 self.offboard_requested = False
+                self.target_yaw = None
+                self.commanded_yaw = None
             else:
                 self.get_logger().info('Landed and disarmed.', throttle_duration_sec=2.0)
 
