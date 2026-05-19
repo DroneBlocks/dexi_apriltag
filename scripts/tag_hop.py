@@ -669,6 +669,12 @@ class TagHop(Node):
                 alpha = 0.9
                 self.target_x = alpha * self.target_x + (1.0 - alpha) * new_target_x
                 self.target_y = alpha * self.target_y + (1.0 - alpha) * new_target_y
+                # Closed-loop yaw also runs in HOLDING — without it, PX4 yaw
+                # drifts during long hovers and the tag appears rotated in
+                # the camera frame even though the drone thinks it's locked.
+                new_yaw, _ = self.compute_target_yaw_from_tag()
+                if new_yaw is not None:
+                    self.target_yaw = new_yaw
             self.send_hold_position(self.target_x, self.target_y, self.target_z)
             self.get_logger().info(
                 f'Hold tag {self.current_target_tag_id()}: {self.hover_duration - elapsed:.1f}s left',
