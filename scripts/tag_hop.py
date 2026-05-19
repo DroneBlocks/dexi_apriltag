@@ -19,8 +19,8 @@ up-edge. Closed-loop: target_yaw recomputes each cycle from the visible
 tag, so PX4 controller noise self-corrects. Robust to EKF heading bias —
 the correction is purely body-relative (what the camera sees).
 
-LED sequence: off → purple (settle) → cyan (centered/hold) → yellow
-(transit) → red (descent) → green (landed).
+LED sequence: off → purple (settle) → cyan (centering) → white (locked
+in HOLDING) → yellow (transit) → red (descent) → green (landed).
 
 Manual override: any RC mode flip away from OFFBOARD triggers a sticky
 abort. Land manually, take off again, sequence re-engages automatically.
@@ -82,7 +82,8 @@ class TagHop(Node):
         self.declare_parameter('filter_length', 5)
         self.declare_parameter('min_takeoff_altitude', 0.30)
         self.declare_parameter('tag_loss_grace', 2.0)         # s tag-loss before timer reset
-        self.declare_parameter('detection_led_color', 'cyan') # LED color while centering or holding on a tag
+        self.declare_parameter('detection_led_color', 'cyan') # LED color during CENTERING (acquiring/chasing the tag)
+        self.declare_parameter('lock_led_color', 'white')     # LED color during HOLDING (locked on tag)
         self.declare_parameter('yaw_rate_max', 0.15)          # rad/s slew limit during yaw alignment
 
         self.tag_family = self.get_parameter('tag_family').value
@@ -109,6 +110,7 @@ class TagHop(Node):
         self.min_takeoff_altitude = self.get_parameter('min_takeoff_altitude').value
         self.tag_loss_grace = self.get_parameter('tag_loss_grace').value
         self.detection_led_color = self.get_parameter('detection_led_color').value
+        self.lock_led_color = self.get_parameter('lock_led_color').value
         self.yaw_rate_max = self.get_parameter('yaw_rate_max').value
 
         # ----- ROS -----
@@ -629,7 +631,8 @@ class TagHop(Node):
                 if time.time() - self.centered_since >= 1.0 and yaw_ok:
                     self.get_logger().info(
                         f'Holding tag {self.current_target_tag_id()} for '
-                        f'{self.hover_duration:.0f}s')
+                        f'{self.hover_duration:.0f}s (LED {self.lock_led_color})')
+                    self.set_led_color(self.lock_led_color)
                     self.hold_start_time = time.time()
                     self.state = HopState.HOLDING
                 elif not yaw_ok:
