@@ -77,7 +77,11 @@ class TagHop(Node):
         self.declare_parameter('tag_loss_grace', 2.0)         # s tag-loss before timer reset
         self.declare_parameter('detection_led_color', 'cyan') # LED color while centering or holding on a tag
         self.declare_parameter('yaw_align', False)            # hold a fixed heading while centering/holding (vs free yaw)
-        self.declare_parameter('yaw_align_deg', 0.0)          # heading to hold when yaw_align is on (0 = North)
+        self.declare_parameter('yaw_align_deg', 0.0)          # fixed heading to hold when no tag in view (0 = North)
+        self.declare_parameter('yaw_align_to_tag', True)      # align to the TAG orientation (drift-free) vs a fixed heading
+        self.declare_parameter('yaw_align_offset_deg', 0.0)   # trim added to the tag-relative yaw command
+        self.declare_parameter('yaw_slew_deg_s', 30.0)        # max yaw-command slew rate (smooths the square-up)
+        self.declare_parameter('yaw_outlier_deg', 25.0)       # reject tag_yaw jumps bigger than this (AprilTag pose flips)
 
         self.tag_family = self.get_parameter('tag_family').value
         self.sequence = list(self.get_parameter('sequence').value)
@@ -105,6 +109,10 @@ class TagHop(Node):
         self.detection_led_color = self.get_parameter('detection_led_color').value
         self.yaw_align = self.get_parameter('yaw_align').value
         self.yaw_setpoint = math.radians(self.get_parameter('yaw_align_deg').value)
+        self.yaw_align_to_tag = self.get_parameter('yaw_align_to_tag').value
+        self.yaw_offset = math.radians(self.get_parameter('yaw_align_offset_deg').value)
+        self.yaw_slew = math.radians(self.get_parameter('yaw_slew_deg_s').value)
+        self.yaw_outlier = math.radians(self.get_parameter('yaw_outlier_deg').value)
 
         # ----- ROS -----
         px4_qos = QoSProfile(
@@ -175,6 +183,10 @@ class TagHop(Node):
         self.tag_y = 0.0   # right
         self.tag_z = 0.0   # down
         self.tag_visible = False
+        self.tag_yaw = 0.0
+        self._tag_yaw_have = False
+        self._yaw_out = None
+        self._yaw_t = None
         self.last_tag_x = None
         self.last_tag_y = None
         self.last_tag_update = None
@@ -277,6 +289,20 @@ class TagHop(Node):
             self.tag_y_buffer.append(new_tag_y)
             if self.last_tag_update is None:
                 self.last_tag_update = time.time()
+            qc = self.tf_buffer.lookup_transform(
+                'camera', tag_frame, rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.02)).transform.rotation
+            # in-plane rotation of the tag in the image (about the optical
+            # axis) — clean, unlike base_link->tag which gimbal-locks at the
+            # 90deg downward camera pitch. Zero when the drone is squared to the tag.
+            new_yaw = math.atan2(2.0 * (qc.x * qc.y + qc.w * qc.z),
+                                 1.0 - 2.0 * (qc.y * qc.y + qc.z * qc.z))
+            # reject single-frame AprilTag pose flips; accept on first sight
+            if self._tag_yaw_have and abs(self._wrap_pi(new_yaw - self.tag_yaw)) > self.yaw_outlier:
+                pass
+            else:
+                self.tag_yaw = new_yaw
+                self._tag_yaw_have = True
             self.tag_visible = True
             return True
         except Exception:
@@ -344,13 +370,38 @@ class TagHop(Node):
         self.offboard_mode_pub.publish(msg)
         self.pause_offboard_setpoints(True)
 
+    @staticmethod
+    def _wrap_pi(a):
+        return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+    def yaw_command(self):
+        # NaN = let PX4 hold current yaw (free). With yaw_align on: align to the
+        # tag's orientation (a fixed visual reference that doesn't drift like the
+        # magless EKF heading). Falls back to the fixed heading if no tag in view.
+        if not self.yaw_align:
+            self._yaw_out = None
+            return float('nan')
+        if self.yaw_align_to_tag and self.tag_visible:
+            target = self._wrap_pi(self.drone_heading + self.tag_yaw + self.yaw_offset)
+            now = time.time()
+            if self._yaw_out is None:
+                self._yaw_out, self._yaw_t = self.drone_heading, now
+            dt = max(0.0, min(0.2, now - self._yaw_t))
+            step = self.yaw_slew * dt
+            err = self._wrap_pi(target - self._yaw_out)
+            self._yaw_out = self._wrap_pi(self._yaw_out + max(-step, min(step, err)))
+            self._yaw_t = now
+            return self._yaw_out
+        self._yaw_out = None
+        return self.yaw_setpoint
+
     def send_hold_position(self, target_x, target_y, target_z):
         msg = TrajectorySetpoint()
         msg.timestamp = int(time.time() * 1e6)
         msg.position = [float(target_x), float(target_y), float(target_z)]
         msg.velocity = [0.0, 0.0, 0.0]
         msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        msg.yaw = self.yaw_setpoint if self.yaw_align else float('nan')
+        msg.yaw = self.yaw_command()
         msg.yawspeed = 0.0
         self.setpoint_pub.publish(msg)
 
@@ -374,7 +425,7 @@ class TagHop(Node):
             msg.position = [float(target_x), float(target_y), float(target_z)]
             msg.velocity = [vx_ned, vy_ned, vz]
         msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        msg.yaw = self.yaw_setpoint if self.yaw_align else float('nan')
+        msg.yaw = self.yaw_command()
         msg.yawspeed = 0.0
         self.setpoint_pub.publish(msg)
 
