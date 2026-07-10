@@ -321,8 +321,8 @@ PX4's EKF NED drifts on flow + IMU (we measured 1+ m of drift on a stationary ta
 
 | Parameter | Default | Description |
 |---|---|---|
-| `sequence` | `[0, 1, 0]` | Tag IDs to visit, in order |
-| `tag_map_ids` / `tag_map_n` / `tag_map_e` | `[0, 1]` / `[0, 1]` / `[0, 0]` | Tag positions (meters, NED). Used only to decide forward vs backward direction during TRANSIT |
+| `sequence` | `[0, 2, 4, 2, 0]` | Tag IDs to visit, in order (launch default; node default is `[0, 1, 0]`) |
+| `tag_map_ids` / `tag_map_n` / `tag_map_e` | `[0, 2, 4]` / `[0, 2, 4]` / `[0, 0, 0]` | Tag positions (meters, NED). Used only to decide forward vs backward direction during TRANSIT |
 | `hover_duration` | 10.0 | Seconds to hold over each tag |
 | `transit_speed` | 0.20 | Body-frame velocity during TRANSIT (m/s) |
 | `centering_speed` | 0.20 | Body-frame velocity while chasing a tag in CENTERING (m/s) |
