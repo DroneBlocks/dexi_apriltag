@@ -274,6 +274,13 @@ Lay your tags in a line. The default corridor is `0 → 2 → 4 → 2 → 0` wit
 ros2 launch dexi_apriltag tag_hop.launch.py
 ```
 
+To hover and hold on a single tag instead of walking a corridor, use `tag_hold.launch.py` (sequence `[0]`, no transit):
+
+```bash
+ros2 launch dexi_apriltag tag_hold.launch.py            # hold over tag 0
+ros2 launch dexi_apriltag tag_hold.launch.py yaw_align:=true   # + hold heading North
+```
+
 This brings up everything `tag_hop` needs:
 - `base_link → camera` static TF
 - `apriltag_odometry` (vision-corrected EKF — recommended for stable holds)
@@ -314,8 +321,8 @@ PX4's EKF NED drifts on flow + IMU (we measured 1+ m of drift on a stationary ta
 
 | Parameter | Default | Description |
 |---|---|---|
-| `sequence` | `[0, 1, 0]` | Tag IDs to visit, in order |
-| `tag_map_ids` / `tag_map_n` / `tag_map_e` | `[0, 1]` / `[0, 1]` / `[0, 0]` | Tag positions (meters, NED). Used only to decide forward vs backward direction during TRANSIT |
+| `sequence` | `[0, 2, 4, 2, 0]` | Tag IDs to visit, in order (launch default; node default is `[0, 1, 0]`) |
+| `tag_map_ids` / `tag_map_n` / `tag_map_e` | `[0, 2, 4]` / `[0, 2, 4]` / `[0, 0, 0]` | Tag positions (meters, NED). Used only to decide forward vs backward direction during TRANSIT |
 | `hover_duration` | 10.0 | Seconds to hold over each tag |
 | `transit_speed` | 0.20 | Body-frame velocity during TRANSIT (m/s) |
 | `centering_speed` | 0.20 | Body-frame velocity while chasing a tag in CENTERING (m/s) |
@@ -323,9 +330,11 @@ PX4's EKF NED drifts on flow + IMU (we measured 1+ m of drift on a stationary ta
 | `transit_timeout` | 15.0 | Max seconds in TRANSIT before handing off to PX4 AUTO.LAND |
 | `centering_threshold` | 0.25 | Body-frame distance to declare centered (m) |
 | `tag_loss_grace` | 2.0 | Seconds the tag can be lost before resetting CENTERING timers |
-| `min_takeoff_altitude` | 0.30 | Airborne gate — won't engage until above this (m) |
+| `min_takeoff_altitude` | 0.30 | Airborne gate — won't engage until above this (m). Reads the downward range sensor (`dist_bottom`), not the EKF `z` estimate, which can drift or invert on flow-only flight |
 | `detection_delay` | 2.0 | Settle window after first detection before engaging (s) |
 | `detection_led_color` | `cyan` | LED color while centering or holding on a tag |
+| `yaw_align` | `false` | Hold a fixed heading while centering/holding instead of free yaw. Use it when the drone slowly yaws off heading (no magnetometer, flow-only) |
+| `yaw_align_deg` | 0.0 | Heading to hold when `yaw_align` is on (0 = North) |
 
 ### Coexistence with `dexi_offboard_manager`
 
@@ -351,6 +360,9 @@ sudo pkill -9 -f apriltag_odometry
 - Corridor 4 m long: tags 0, 2, 4 at 0/2/4 m N
 - `transit_speed=0.20`, `centering_speed=0.20`, `min_transit_duration=1.0`
 - Sequence `[0, 2, 4, 2, 0]` flown end-to-end with AUTO.LAND completion
+
+- **DEXI-3 (CM5 + H743-AIO + Arducam fixed-focus IMX708)**, indoor, PX4 v1.17.0, optical flow + range sensor (no GPS)
+- Single-tag hold (`tag_hold.launch.py`, 167 mm tag 0) engaged and held via the range-sensor airborne gate
 
 ## Printing tags
 

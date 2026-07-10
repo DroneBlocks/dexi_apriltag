@@ -76,6 +76,8 @@ class TagHop(Node):
         self.declare_parameter('min_takeoff_altitude', 0.30)
         self.declare_parameter('tag_loss_grace', 2.0)         # s tag-loss before timer reset
         self.declare_parameter('detection_led_color', 'cyan') # LED color while centering or holding on a tag
+        self.declare_parameter('yaw_align', False)            # hold a fixed heading while centering/holding (vs free yaw)
+        self.declare_parameter('yaw_align_deg', 0.0)          # heading to hold when yaw_align is on (0 = North)
 
         self.tag_family = self.get_parameter('tag_family').value
         self.sequence = list(self.get_parameter('sequence').value)
@@ -101,6 +103,8 @@ class TagHop(Node):
         self.min_takeoff_altitude = self.get_parameter('min_takeoff_altitude').value
         self.tag_loss_grace = self.get_parameter('tag_loss_grace').value
         self.detection_led_color = self.get_parameter('detection_led_color').value
+        self.yaw_align = self.get_parameter('yaw_align').value
+        self.yaw_setpoint = math.radians(self.get_parameter('yaw_align_deg').value)
 
         # ----- ROS -----
         px4_qos = QoSProfile(
@@ -122,7 +126,7 @@ class TagHop(Node):
             Bool, '/dexi/pause_setpoints', 10)
 
         self.local_pos_sub = self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position',
+            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
             self.local_position_callback, px4_qos)
         self.land_detected = False
         self.land_detected_sub = self.create_subscription(
@@ -194,7 +198,7 @@ class TagHop(Node):
         self.drone_x = msg.x
         self.drone_y = msg.y
         self.drone_z = msg.z
-        self.current_altitude = -msg.z
+        self.current_altitude = msg.dist_bottom if msg.dist_bottom_valid else -msg.z
         self.current_vz = msg.vz
         self.drone_heading = msg.heading
         self.last_position_time = time.time()
@@ -321,6 +325,15 @@ class TagHop(Node):
         # which can interfere with PX4's descent.
         if self.state == HopState.AUTO_LANDING or self.aborted:
             return
+        # In SEARCHING/LANDED the pilot is flying manually — do NOT advertise
+        # OFFBOARD to the FC. Streaming offboard_control_mode + trajectory_setpoint
+        # to the H743 over uXRCE-DDS during the manual line-up loads the FC and
+        # jitters the flow position-hold. Keep the offboard_manager paused so it
+        # stays quiet too; the FC stream resumes in DETECTED (gives PX4 its >=1s
+        # of pre-OFFBOARD setpoints).
+        if self.state in (HopState.SEARCHING, HopState.LANDED):
+            self.pause_offboard_setpoints(True)
+            return
         msg = OffboardControlMode()
         msg.timestamp = int(time.time() * 1e6)
         msg.position = True
@@ -337,7 +350,7 @@ class TagHop(Node):
         msg.position = [float(target_x), float(target_y), float(target_z)]
         msg.velocity = [0.0, 0.0, 0.0]
         msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        msg.yaw = float('nan')
+        msg.yaw = self.yaw_setpoint if self.yaw_align else float('nan')
         msg.yawspeed = 0.0
         self.setpoint_pub.publish(msg)
 
@@ -361,7 +374,7 @@ class TagHop(Node):
             msg.position = [float(target_x), float(target_y), float(target_z)]
             msg.velocity = [vx_ned, vy_ned, vz]
         msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        msg.yaw = float('nan')
+        msg.yaw = self.yaw_setpoint if self.yaw_align else float('nan')
         msg.yawspeed = 0.0
         self.setpoint_pub.publish(msg)
 
@@ -442,8 +455,9 @@ class TagHop(Node):
                 self.set_led_color('purple')
                 self.detection_time = time.time()
                 self.state = HopState.DETECTED
-            else:
-                self.send_position_setpoint(0.0, 0.0, 0.0)
+            # SEARCHING: stream NOTHING to the FC (see send_heartbeat gate).
+            # The pilot flies manually with zero /fmu/in traffic = no flow-hold
+            # jitter. FC streaming begins in DETECTED, before OFFBOARD engage.
 
         elif self.state == HopState.DETECTED:
             if not tag_found:
