@@ -81,7 +81,7 @@ class TagHop(Node):
         self.declare_parameter('yaw_align_to_tag', True)      # align to the TAG orientation (drift-free) vs a fixed heading
         self.declare_parameter('yaw_align_offset_deg', 0.0)   # trim added to the tag-relative yaw command
         self.declare_parameter('yaw_slew_deg_s', 30.0)        # max yaw-command slew rate (smooths the square-up)
-        self.declare_parameter('yaw_outlier_deg', 25.0)       # reject tag_yaw jumps bigger than this (AprilTag pose flips)
+        self.declare_parameter('yaw_lock_radius', 0.40)       # only update the yaw lock when the tag is within this of frame centre (m)
 
         self.tag_family = self.get_parameter('tag_family').value
         self.sequence = list(self.get_parameter('sequence').value)
@@ -112,7 +112,7 @@ class TagHop(Node):
         self.yaw_align_to_tag = self.get_parameter('yaw_align_to_tag').value
         self.yaw_offset = math.radians(self.get_parameter('yaw_align_offset_deg').value)
         self.yaw_slew = math.radians(self.get_parameter('yaw_slew_deg_s').value)
-        self.yaw_outlier = math.radians(self.get_parameter('yaw_outlier_deg').value)
+        self.yaw_lock_radius = self.get_parameter('yaw_lock_radius').value
 
         # ----- ROS -----
         px4_qos = QoSProfile(
@@ -184,7 +184,9 @@ class TagHop(Node):
         self.tag_z = 0.0   # down
         self.tag_visible = False
         self.tag_yaw = 0.0
-        self._tag_yaw_have = False
+        self._tag_fresh = False
+        self._last_stamp = None
+        self._yaw_target = None
         self._yaw_out = None
         self._yaw_t = None
         self.last_tag_x = None
@@ -289,20 +291,15 @@ class TagHop(Node):
             self.tag_y_buffer.append(new_tag_y)
             if self.last_tag_update is None:
                 self.last_tag_update = time.time()
-            qc = self.tf_buffer.lookup_transform(
+            tc = self.tf_buffer.lookup_transform(
                 'camera', tag_frame, rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=0.02)).transform.rotation
-            # in-plane rotation of the tag in the image (about the optical
-            # axis) — clean, unlike base_link->tag which gimbal-locks at the
-            # 90deg downward camera pitch. Zero when the drone is squared to the tag.
-            new_yaw = math.atan2(2.0 * (qc.x * qc.y + qc.w * qc.z),
-                                 1.0 - 2.0 * (qc.y * qc.y + qc.z * qc.z))
-            # reject single-frame AprilTag pose flips; accept on first sight
-            if self._tag_yaw_have and abs(self._wrap_pi(new_yaw - self.tag_yaw)) > self.yaw_outlier:
-                pass
-            else:
-                self.tag_yaw = new_yaw
-                self._tag_yaw_have = True
+                timeout=rclpy.duration.Duration(seconds=0.02))
+            qc = tc.transform.rotation
+            self.tag_yaw = math.atan2(2.0 * (qc.x * qc.y + qc.w * qc.z),
+                                      1.0 - 2.0 * (qc.y * qc.y + qc.z * qc.z))
+            stamp = tc.header.stamp.sec + tc.header.stamp.nanosec * 1e-9
+            self._tag_fresh = self._last_stamp is None or stamp > self._last_stamp + 1e-4
+            self._last_stamp = stamp
             self.tag_visible = True
             return True
         except Exception:
@@ -375,20 +372,32 @@ class TagHop(Node):
         return (a + math.pi) % (2.0 * math.pi) - math.pi
 
     def yaw_command(self):
-        # NaN = let PX4 hold current yaw (free). With yaw_align on: align to the
-        # tag's orientation (a fixed visual reference that doesn't drift like the
-        # magless EKF heading). Falls back to the fixed heading if no tag in view.
+        # NaN = let PX4 hold current yaw (free). With yaw_align on and the
+        # tag-relative mode, hold an ABSOLUTE heading derived from the tag (a
+        # fixed visual reference that doesn't drift like the magless EKF heading).
         if not self.yaw_align:
             self._yaw_out = None
+            self._yaw_target = None
             return float('nan')
-        if self.yaw_align_to_tag and self.tag_visible:
-            target = self._wrap_pi(self.drone_heading + self.tag_yaw + self.yaw_offset)
+        if self.yaw_align_to_tag:
+            # Update the absolute target ONLY from a fresh detection with the tag
+            # near frame centre — edge/stale poses are unreliable. The COMMAND
+            # persists regardless, so a brief tag flicker or an EKF heading glitch
+            # can't snap or spin the drone; it just keeps holding the last target.
+            if self.tag_visible and self._tag_fresh:
+                centred = (abs(self.tag_x) < self.yaw_lock_radius and
+                           abs(self.tag_y) < self.yaw_lock_radius)
+                if centred:
+                    self._yaw_target = self._wrap_pi(
+                        self.drone_heading + self.tag_yaw + self.yaw_offset)
+            if self._yaw_target is None:
+                return float('nan')   # no lock yet — PX4 holds current yaw
             now = time.time()
             if self._yaw_out is None:
                 self._yaw_out, self._yaw_t = self.drone_heading, now
             dt = max(0.0, min(0.2, now - self._yaw_t))
             step = self.yaw_slew * dt
-            err = self._wrap_pi(target - self._yaw_out)
+            err = self._wrap_pi(self._yaw_target - self._yaw_out)
             self._yaw_out = self._wrap_pi(self._yaw_out + max(-step, min(step, err)))
             self._yaw_t = now
             return self._yaw_out

@@ -338,7 +338,7 @@ PX4's EKF NED drifts on flow + IMU (we measured 1+ m of drift on a stationary ta
 | `yaw_align_deg` | 0.0 | Fixed heading to hold when `yaw_align_to_tag` is false or no tag in view (0 = North) |
 | `yaw_align_offset_deg` | 0.0 | Trim added to the tag-relative yaw command |
 | `yaw_slew_deg_s` | 30.0 | Max yaw-command slew rate — smooths the square-up on engage |
-| `yaw_outlier_deg` | 25.0 | Reject `tag_yaw` jumps bigger than this (filters single-frame AprilTag pose flips) |
+| `yaw_lock_radius` | 0.40 | Only update the yaw lock while the tag is within this of frame centre, m (edge poses are unreliable). Detection dropouts and EKF heading glitches then just hold the last aligned heading — no snap or spin |
 
 ### Coexistence with `dexi_offboard_manager`
 

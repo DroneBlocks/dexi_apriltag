@@ -109,8 +109,8 @@ def generate_launch_description():
         'yaw_slew_deg_s', default_value='30.0',
         description='Max yaw-command slew rate — smooths the square-up on engage'))
     ld.add_action(DeclareLaunchArgument(
-        'yaw_outlier_deg', default_value='25.0',
-        description='Reject tag_yaw jumps bigger than this (AprilTag pose flips)'))
+        'yaw_lock_radius', default_value='0.40',
+        description='Only update the yaw lock while the tag is within this of frame centre (m)'))
     ld.add_action(DeclareLaunchArgument(
         'tag_family', default_value='tag36h11',
         description='AprilTag family'))
@@ -149,7 +149,7 @@ def generate_launch_description():
     yaw_align_to_tag = ParameterValue(LaunchConfiguration('yaw_align_to_tag'), value_type=bool)
     yaw_align_offset_deg = ParameterValue(LaunchConfiguration('yaw_align_offset_deg'), value_type=float)
     yaw_slew_deg_s = ParameterValue(LaunchConfiguration('yaw_slew_deg_s'), value_type=float)
-    yaw_outlier_deg = ParameterValue(LaunchConfiguration('yaw_outlier_deg'), value_type=float)
+    yaw_lock_radius = ParameterValue(LaunchConfiguration('yaw_lock_radius'), value_type=float)
     tag_family = LaunchConfiguration('tag_family')
 
     # ----- Static transform: base_link -> camera -----
@@ -217,7 +217,7 @@ def generate_launch_description():
             'yaw_align_to_tag': yaw_align_to_tag,
             'yaw_align_offset_deg': yaw_align_offset_deg,
             'yaw_slew_deg_s': yaw_slew_deg_s,
-            'yaw_outlier_deg': yaw_outlier_deg,
+            'yaw_lock_radius': yaw_lock_radius,
         }]
     )
     ld.add_action(tag_hop_node)
