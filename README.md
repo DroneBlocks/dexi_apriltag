@@ -286,6 +286,15 @@ This brings up everything `tag_hop` needs:
 - `apriltag_odometry` (vision-corrected EKF — recommended for stable holds)
 - `tag_hop` itself
 
+**Running alongside the DEXI-OS bringup:** launch it from an interactive SSH
+session (`source ros2_jazzy` + `dexi_ws`, then the command above; Ctrl-C to
+stop). It relies on the bringup's `camera_node` + `apriltag_node` for the tag
+TF, so leave those running. It coordinates with `dexi_offboard_manager` by
+pausing it on engage — if you ever see yaw/position glitches during a hold,
+`sudo pkill -9 -f px4_offboard_manager` before flying. The `base_link → camera`
+TF is also published by bringup; the duplicate is harmless (same transform).
+Close any GCS/browser camera stream during a real flight — it loads the CPU.
+
 For non-default corridor layouts (different sequence or spacing), copy `launch/tag_hop.launch.py` and edit the `sequence` / `tag_map_ids` / `tag_map_n` / `tag_map_e` constants. ROS2 launch substitutions don't support array params, so they're hardcoded in the launch file rather than CLI args. Scalar params (`hover_duration`, `transit_speed`, etc.) ARE launch args:
 
 ```bash
