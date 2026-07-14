@@ -98,7 +98,19 @@ def generate_launch_description():
         description='Hold a fixed heading while centering/holding (vs free yaw)'))
     ld.add_action(DeclareLaunchArgument(
         'yaw_align_deg', default_value='0.0',
-        description='Heading to hold when yaw_align is on (0 = North)'))
+        description='Heading to hold when yaw_align on and no tag in view (0 = North)'))
+    ld.add_action(DeclareLaunchArgument(
+        'yaw_align_to_tag', default_value='true',
+        description='Align to the tag orientation (drift-free) vs a fixed heading'))
+    ld.add_action(DeclareLaunchArgument(
+        'yaw_align_offset_deg', default_value='0.0',
+        description='Trim added to the tag-relative yaw command'))
+    ld.add_action(DeclareLaunchArgument(
+        'yaw_slew_deg_s', default_value='30.0',
+        description='Max yaw-command slew rate — smooths the square-up on engage'))
+    ld.add_action(DeclareLaunchArgument(
+        'yaw_lock_radius', default_value='0.40',
+        description='Only update the yaw lock while the tag is within this of frame centre (m)'))
     ld.add_action(DeclareLaunchArgument(
         'tag_family', default_value='tag36h11',
         description='AprilTag family'))
@@ -134,6 +146,10 @@ def generate_launch_description():
     detection_led_color = LaunchConfiguration('detection_led_color')
     yaw_align = ParameterValue(LaunchConfiguration('yaw_align'), value_type=bool)
     yaw_align_deg = ParameterValue(LaunchConfiguration('yaw_align_deg'), value_type=float)
+    yaw_align_to_tag = ParameterValue(LaunchConfiguration('yaw_align_to_tag'), value_type=bool)
+    yaw_align_offset_deg = ParameterValue(LaunchConfiguration('yaw_align_offset_deg'), value_type=float)
+    yaw_slew_deg_s = ParameterValue(LaunchConfiguration('yaw_slew_deg_s'), value_type=float)
+    yaw_lock_radius = ParameterValue(LaunchConfiguration('yaw_lock_radius'), value_type=float)
     tag_family = LaunchConfiguration('tag_family')
 
     # ----- Static transform: base_link -> camera -----
@@ -198,6 +214,10 @@ def generate_launch_description():
             'detection_led_color': detection_led_color,
             'yaw_align': yaw_align,
             'yaw_align_deg': yaw_align_deg,
+            'yaw_align_to_tag': yaw_align_to_tag,
+            'yaw_align_offset_deg': yaw_align_offset_deg,
+            'yaw_slew_deg_s': yaw_slew_deg_s,
+            'yaw_lock_radius': yaw_lock_radius,
         }]
     )
     ld.add_action(tag_hop_node)

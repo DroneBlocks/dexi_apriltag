@@ -278,13 +278,22 @@ To hover and hold on a single tag instead of walking a corridor, use `tag_hold.l
 
 ```bash
 ros2 launch dexi_apriltag tag_hold.launch.py            # hold over tag 0
-ros2 launch dexi_apriltag tag_hold.launch.py yaw_align:=true   # + hold heading North
+ros2 launch dexi_apriltag tag_hold.launch.py yaw_align:=true   # + square up to the tag and hold
 ```
 
 This brings up everything `tag_hop` needs:
 - `base_link → camera` static TF
 - `apriltag_odometry` (vision-corrected EKF — recommended for stable holds)
 - `tag_hop` itself
+
+**Running alongside the DEXI-OS bringup:** launch it from an interactive SSH
+session (`source ros2_jazzy` + `dexi_ws`, then the command above; Ctrl-C to
+stop). It relies on the bringup's `camera_node` + `apriltag_node` for the tag
+TF, so leave those running. It coordinates with `dexi_offboard_manager` by
+pausing it on engage — if you ever see yaw/position glitches during a hold,
+`sudo pkill -9 -f px4_offboard_manager` before flying. The `base_link → camera`
+TF is also published by bringup; the duplicate is harmless (same transform).
+Close any GCS/browser camera stream during a real flight — it loads the CPU.
 
 For non-default corridor layouts (different sequence or spacing), copy `launch/tag_hop.launch.py` and edit the `sequence` / `tag_map_ids` / `tag_map_n` / `tag_map_e` constants. ROS2 launch substitutions don't support array params, so they're hardcoded in the launch file rather than CLI args. Scalar params (`hover_duration`, `transit_speed`, etc.) ARE launch args:
 
@@ -333,8 +342,12 @@ PX4's EKF NED drifts on flow + IMU (we measured 1+ m of drift on a stationary ta
 | `min_takeoff_altitude` | 0.30 | Airborne gate — won't engage until above this (m). Reads the downward range sensor (`dist_bottom`), not the EKF `z` estimate, which can drift or invert on flow-only flight |
 | `detection_delay` | 2.0 | Settle window after first detection before engaging (s) |
 | `detection_led_color` | `cyan` | LED color while centering or holding on a tag |
-| `yaw_align` | `false` | Hold a fixed heading while centering/holding instead of free yaw. Use it when the drone slowly yaws off heading (no magnetometer, flow-only) |
-| `yaw_align_deg` | 0.0 | Heading to hold when `yaw_align` is on (0 = North) |
+| `yaw_align` | `false` | Hold heading while centering/holding instead of free yaw. For the no-magnetometer yaw drift (flow-only) |
+| `yaw_align_to_tag` | `true` | Align to the **tag's** orientation (a fixed visual reference that doesn't drift) rather than a fixed compass heading. Requires the tag in view |
+| `yaw_align_deg` | 0.0 | Fixed heading to hold when `yaw_align_to_tag` is false or no tag in view (0 = North) |
+| `yaw_align_offset_deg` | 0.0 | Trim added to the tag-relative yaw command |
+| `yaw_slew_deg_s` | 30.0 | Max yaw-command slew rate — smooths the square-up on engage |
+| `yaw_lock_radius` | 0.40 | Only update the yaw lock while the tag is within this of frame centre, m (edge poses are unreliable). Detection dropouts and EKF heading glitches then just hold the last aligned heading — no snap or spin |
 
 ### Coexistence with `dexi_offboard_manager`
 
