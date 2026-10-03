@@ -377,6 +377,58 @@ sudo pkill -9 -f apriltag_odometry
 - **DEXI-3 (CM5 + H743-AIO + Arducam fixed-focus IMX708)**, indoor, PX4 v1.17.0, optical flow + range sensor (no GPS)
 - Single-tag hold (`tag_hold.launch.py`, 167 mm tag 0) engaged and held via the range-sensor airborne gate
 
+## tag_nav.py
+
+AprilTag navigation primitives behind one service, for DroneBlocks, Python and
+Node-RED alike. It reads the detector's tag transforms and drives the offboard
+manager by velocity (`set_velocity_body`) or by position hold (`hold_ned`). It
+never publishes a trajectory setpoint, so the manager stays the single owner of
+the setpoint stream. Design: `docs/NAVIGATION_FRAMEWORK.md`.
+
+```bash
+ros2 launch dexi_apriltag tag_nav.launch.py                      # DEXI 5 (config/tag_nav_dexi5.yaml)
+ros2 launch dexi_apriltag tag_nav.launch.py config:=tag_nav_sim.yaml
+ros2 launch dexi_apriltag tag_nav.launch.py dry_run:=true        # log what it would do, send nothing
+
+ros2 service call /dexi/tag_nav/execute dexi_interfaces/srv/ExecuteBlocklyCommand \
+  "{command: center_on_tag, parameter: 2.0, timeout: 25.0}"
+ros2 topic echo --full-length /dexi/tag_nav/status                # JSON, 5 Hz
+```
+
+| command | parameter | behavior |
+|---|---|---|
+| `wait_for_offboard` | ignored | **pilot hand-off**: returns when the aircraft is armed, airborne, in OFFBOARD and `/dexi/tag_nav/engage` is true. Fly to a tag by hand, give the go, the mission continues. Engage comes from an RC aux switch (`engage_aux_index`), a Node-RED button (`docs/node-red-tag-navigation-flow.json`), a block or a script; it latches, clears on disarm, and clearing it stands a running primitive down |
+| `wait_for_tag` | tag id, `-1` = any | returns when the tag is seen twice in a row |
+| `center_on_tag` | tag id, `-1` = whichever tag is in view | tapered velocity chase to 0.25 m, then PX4 position hold at the tag's measured position refined from every detection; done inside 10 cm for 0.7 s (or 5 s in hold inside 0.25 m, reporting the error) |
+| `fly_until_tag` | tag id, `-1` = the first tag not in view at the start | flies the body velocity given in `north`/`east`/`down` (m/s, FRD) until the tag is seen twice in a row, then holds position; `timeout` required |
+
+Hand-off sequence: the GCS block `wait for pilot hand-off` sends the manager
+`start_setpoint_stream` (heartbeat WITHOUT commanding Offboard; the stream keeps
+its setpoint on the aircraft until Offboard is entered, then latches there) and
+then calls `wait_for_offboard`. Never use `start_offboard_heartbeat` for this: it
+commands Offboard itself, and a hold latched on the ground at launch brings the
+aircraft straight down to that point when the pilot switches in the air. The pilot flies in Position mode, flips the RC
+switch to Offboard (or presses ENGAGE in the Node-RED flow, which publishes
+engage and sends `switch_offboard_mode`), the aircraft holds where it is, and the
+mission runs on. Flipping back to Position stands everything down. Flow:
+`docs/node-red-tag-navigation-flow.json`; full command list:
+`docs/COMMAND_CONTRACT.md`.
+
+Gates: refuses unless the aircraft is airborne (rangefinder, or EKF height while
+armed) and in OFFBOARD; leaving OFFBOARD stands it down; a tag lost for 8 s
+fails the command. On success out of the hold the manager is left holding the
+tag position, so the next block starts from a real position hold.
+
+Mount values are per airframe and live in `config/tag_nav_<airframe>.yaml`.
+Measure them (tape from the lens center to the frame center, then confirm with
+the tag centered in the image: the raw offset should read near zero). The
+offset math and chase law come from `apriltag-corridor-mission-code`, flown on
+the DEXI 5 and DEXI 10.
+
+Needs `hold_ned` in `dexi_offboard` (the `goto_ned` arrival logic parks the
+aircraft up to 0.25 m off). The CM4 bringup feeds the detector a 10 Hz image
+stream for this; the 2 Hz YOLO stream is too slow to servo on.
+
 ## Printing tags
 
 Tag PNGs are in `tags/` (tags 0-19, tag36h11 family, 360x360px at 72 DPI for 4-inch print). Print at exactly 4 inches (0.10m) — tag size must match the `size` parameter in `apriltag_ros`.
