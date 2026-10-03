@@ -240,7 +240,7 @@
   "x": 360,
   "y": 120,
   "outputs": 2,
-  "func": "// tag_nav publishes JSON at 5 Hz. Output 1: START on the rising edge of \"engaged, armed, in OFFBOARD\"\n// (RC channel 7 or the ENGAGE button), RESET on the falling edge. Output 2: re-arm the hand-off\n// stream whenever the aircraft disarms, because landing stops the manager's setpoint stream.\nlet st = {}; try { st = JSON.parse(msg.payload.data || '{}'); } catch (e) { return null; }\nconst go = st.engaged === true && st.nav_state === 14 && st.armed === true;\nconst was = context.get('go') || false;\ncontext.set('go', go); flow.set('tagnav_go', go);   // the mission node reads this on a failure\nconst armed = st.armed === true, wasArmed = context.get('armed');\ncontext.set('armed', armed);\nlet out1 = null, out2 = null;\n// trace: last 40 samples the trigger saw (read with GET /context/node/tagnav_edge)\nconst tr = context.get('trace') || [];\ntr.push([new Date().toISOString().slice(11, 23), st.engaged ? 1 : 0, st.nav_state, st.armed ? 1 : 0, go ? 1 : 0]);\nwhile (tr.length > 40) tr.shift();\ncontext.set('trace', tr);\nif (go && !was) { node.status({ fill: 'green', shape: 'dot', text: 'hand-off \u2192 mission' }); out1 = { topic: 'start' }; }\nif (!go && was) { node.status({ fill: 'grey', shape: 'ring', text: 'stood down' }); out1 = { topic: 'reset' }; }\nif (wasArmed === true && !armed) out2 = { topic: 'rearm' };\nreturn [out1, out2];",
+  "func": "// tag_nav publishes JSON at 5 Hz. Output 1: START on the rising edge of \"engaged, armed, in OFFBOARD\"\n// (RC channel 7 or the ENGAGE button), RESET on the falling edge. Output 2: re-arm the hand-off\n// stream whenever the aircraft disarms, because landing stops the manager's setpoint stream.\nlet st = {}; try { st = JSON.parse(msg.payload.data || '{}'); } catch (e) { return null; }\nconst go = st.engaged === true && st.nav_state === 14 && st.armed === true;\nconst was = context.get('go') || false;\ncontext.set('go', go); flow.set('tagnav_go', go);   // the mission node reads this on a failure\nconst armed = st.armed === true, wasArmed = context.get('armed');\ncontext.set('armed', armed); flow.set('tagnav_armed', armed);\nlet out1 = null, out2 = null;\n// trace: last 40 samples the trigger saw (read with GET /context/node/tagnav_edge)\nconst tr = context.get('trace') || [];\ntr.push([new Date().toISOString().slice(11, 23), st.engaged ? 1 : 0, st.nav_state, st.armed ? 1 : 0, go ? 1 : 0]);\nwhile (tr.length > 40) tr.shift();\ncontext.set('trace', tr);\nif (go && !was) { node.status({ fill: 'green', shape: 'dot', text: 'hand-off \u2192 mission' }); out1 = { topic: 'start' }; }\nif (!go && was) { node.status({ fill: 'grey', shape: 'ring', text: 'stood down' }); out1 = { topic: 'reset' }; }\nif (wasArmed === true && !armed) out2 = { topic: 'rearm' };\nreturn [out1, out2];",
   "id": "tagnav_edge",
   "z": "tagnav_tab",
   "wires": [
@@ -1011,7 +1011,7 @@
   "y": 1060,
   "wires": [
    [
-    "tagnav_resetsim_http"
+    "tagnav_resetsim_gate"
    ]
   ]
  },
@@ -1049,6 +1049,24 @@
   "outputs": 1,
   "func": "const p = msg.payload || {};\nconst txt = msg.statusCode === 200 ? 'sim reset: aircraft back on tag 0 in ~12 s' : 'sim reset failed: ' + (p.error || msg.statusCode || 'no simulator here');\nreturn { payload: txt };",
   "wires": [
+   [
+    "tagnav_ui_result"
+   ]
+  ]
+ },
+ {
+  "id": "tagnav_resetsim_gate",
+  "type": "function",
+  "z": "tagnav_tab",
+  "name": "disarmed?",
+  "x": 300,
+  "y": 1060,
+  "outputs": 2,
+  "func": "if (flow.get('tagnav_armed')) return [null, { payload: 'sim reset refused: land and disarm first' }];\nreturn [msg, null];",
+  "wires": [
+   [
+    "tagnav_resetsim_http"
+   ],
    [
     "tagnav_ui_result"
    ]
