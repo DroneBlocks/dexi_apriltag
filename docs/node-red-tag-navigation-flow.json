@@ -986,5 +986,72 @@
     "tagnav_build"
    ]
   ]
+ },
+ {
+  "id": "tagnav_ui_resetsim",
+  "type": "ui_button",
+  "z": "tagnav_tab",
+  "name": "",
+  "group": "tagnav_ui_grp",
+  "order": 13,
+  "width": "6",
+  "height": "1",
+  "passthru": false,
+  "label": "RESET SIM (tag 0)",
+  "tooltip": "Simulator only: puts the aircraft back on tag 0 (must be disarmed)",
+  "color": "",
+  "bgcolor": "#2A4D69",
+  "className": "",
+  "icon": "",
+  "payload": "",
+  "payloadType": "str",
+  "topic": "resetsim",
+  "topicType": "str",
+  "x": 160,
+  "y": 1060,
+  "wires": [
+   [
+    "tagnav_resetsim_http"
+   ]
+  ]
+ },
+ {
+  "id": "tagnav_resetsim_http",
+  "type": "http request",
+  "z": "tagnav_tab",
+  "name": "POST sim-control /reset",
+  "method": "POST",
+  "ret": "obj",
+  "paytoqs": "ignore",
+  "url": "http://sim-control:8090/reset",
+  "tls": "",
+  "persist": false,
+  "proxy": "",
+  "insecureHTTPParser": false,
+  "authType": "",
+  "senderr": true,
+  "headers": [],
+  "x": 430,
+  "y": 1060,
+  "wires": [
+   [
+    "tagnav_resetsim_text"
+   ]
+  ]
+ },
+ {
+  "id": "tagnav_resetsim_text",
+  "type": "function",
+  "z": "tagnav_tab",
+  "name": "reset text",
+  "x": 660,
+  "y": 1060,
+  "outputs": 1,
+  "func": "const p = msg.payload || {};\nconst txt = msg.statusCode === 200 ? 'sim reset: aircraft back on tag 0 in ~12 s' : 'sim reset failed: ' + (p.error || msg.statusCode || 'no simulator here');\nreturn { payload: txt };",
+  "wires": [
+   [
+    "tagnav_ui_result"
+   ]
+  ]
  }
 ]
