@@ -1,0 +1,16 @@
+# AVR 2026 corridor, DEXI-10 route. One tag map for apriltag_odometry (fusion) and
+# tag_nav (go_to_tag). Frame: tag 0 at the origin, +x along the route toward the
+# bullseye, y across the court. Pitch 59 in (1.4986 m), from the game manual's route
+# map as measured in avr-yolo/scripts/build_tag_map.py; the CAD plates agree to 0.3 in.
+# Survey the absolute positions on the real field before relying on them.
+# Tag size: 6 in (0.1524 m) black square on a 7 in white target, tag36h11.
+tag_map:
+  frame: avr2026_dexi10
+  tag_family: tag36h11
+  tag_size: 0.1524
+  ids: [0, 1, 2, 3, 4, 5, 6]
+  x:   [0.0000, 1.4986, 2.9972, 4.4958, 5.9944, 7.4930, 8.9916]
+  y:   [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  notes:
+    0: "first checkpoint; helipad about 45 in behind it"
+    6: "inside the bullseye; landing target"

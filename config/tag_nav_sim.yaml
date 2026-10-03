@@ -1,0 +1,45 @@
+# tag_nav parameters for the dexi-sim-ftw SITL (Unity or the three.js corridor sim).
+# The simulated camera is mounted like the DEXI-5's: 105 mm ahead of the body center
+# (viewer-corridor.html?cam_fwd=0.105), so the same offset math runs in both worlds.
+tag_nav:
+  ros__parameters:
+    camera_forward_offset: 0.105
+    camera_right_offset: 0.0
+    camera_yaw_deg: 0.0
+    tag_scale: 1.0
+    tag_family: tag36h11
+    centering_speed: 0.20
+    centering_taper_dist: 0.30
+    centering_min_speed: 0.0
+    filter_length: 5
+    hold_enter: 0.25
+    hold_exit: 0.40
+    hold_alpha: 0.8
+    hold_nudge: 0.25
+    hold_nudge_max: 0.012
+    hold_settled_m: 0.35
+    hold_settled_v: 0.12
+    hold_accept_s: 8.0
+    hold_command: hold_ned
+    centering_gate: 0.10
+    centering_settle: 0.7
+    tag_stale_s: 0.5
+    tag_loss_grace: 3.0
+    centering_loss_timeout: 8.0
+    hold_altitude: true
+    alt_kz: 1.0
+    alt_max_rate: 0.3
+    # SITL has GPS, so the rangefinder gate is replaced by EKF height while armed.
+    require_airborne: true
+    min_airborne_alt: 0.30
+    require_offboard: true
+    dry_run: false
+    # Hand-off from RC: aux channel index (1..6, 0 = none). The original corridor script used aux2 (= RC channel 9).
+    engage_aux_index: 0
+    engage_aux_threshold: 0.5
+    # ch7 is the PX4 offboard switch (RC_MAP_OFFB_SW=7); entering Offboard is the go.
+    engage_on_offboard: false
+    transit_min_s: 0.5
+    transit_confirm: 2
+    loop_hz: 20.0
+    command_hz: 10.0

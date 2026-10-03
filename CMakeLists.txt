@@ -75,6 +75,7 @@ install(PROGRAMS
   scripts/corridor_navigation.py
   scripts/tag_yaw_track.py
   scripts/tag_hop.py
+  scripts/tag_nav.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
