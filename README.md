@@ -397,7 +397,7 @@ ros2 topic echo --full-length /dexi/tag_nav/status                # JSON, 5 Hz
 
 | command | parameter | behavior |
 |---|---|---|
-| `wait_for_offboard` | ignored | **pilot hand-off**: returns when the aircraft is armed, airborne, in OFFBOARD and `/dexi/tag_nav/engage` is true. Fly to a tag by hand, give the go, the mission continues. Engage comes from an RC aux switch (`engage_aux_index`), a Node-RED button (`docs/node-red-tag-navigation-flow.json`), a block or a script; it latches, clears on disarm, and clearing it stands a running primitive down |
+| `wait_for_offboard` | ignored | **pilot hand-off**: returns when the aircraft is armed, airborne, in OFFBOARD and `/dexi/tag_nav/engage` is true. Fly to a tag by hand, give the go, the mission continues. Engage comes from an RC aux switch (`engage_aux_index`), a Node-RED button (the `DEXI Tag Navigation` flow in node-red-dexi (`flows/tag_navigation.json`, shipped in the DEXI Node-RED image)), a block or a script; it latches, clears on disarm, and clearing it stands a running primitive down |
 | `wait_for_tag` | tag id, `-1` = any | returns when the tag is seen twice in a row |
 | `center_on_tag` | tag id, `-1` = whichever tag is in view | tapered velocity chase to 0.25 m, then PX4 position hold at the tag's measured position refined from every detection; done inside 10 cm for 0.7 s (or 5 s in hold inside 0.25 m, reporting the error) |
 | `fly_until_tag` | tag id, `-1` = the first tag not in view at the start | flies the body velocity given in `north`/`east`/`down` (m/s, FRD) until the tag is seen twice in a row, then holds position; `timeout` required |
@@ -411,7 +411,7 @@ aircraft straight down to that point when the pilot switches in the air. The pil
 switch to Offboard (or presses ENGAGE in the Node-RED flow, which publishes
 engage and sends `switch_offboard_mode`), the aircraft holds where it is, and the
 mission runs on. Flipping back to Position stands everything down. Flow:
-`docs/node-red-tag-navigation-flow.json`; full command list:
+the `DEXI Tag Navigation` flow in node-red-dexi (`flows/tag_navigation.json`, shipped in the DEXI Node-RED image); full command list:
 `docs/COMMAND_CONTRACT.md`.
 
 Gates: refuses unless the aircraft is airborne (rangefinder, or EKF height while

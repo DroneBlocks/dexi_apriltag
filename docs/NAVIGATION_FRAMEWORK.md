@@ -71,7 +71,7 @@ drives Layer 2 by velocity or hold. It never publishes a setpoint. Service
 
 | Command | What it does | Status |
 |---|---|---|
-| `wait_for_offboard` | the pilot hand-off: returns when armed, airborne, in OFFBOARD and `/dexi/tag_nav/engage` is true; engage comes from an RC aux switch (`engage_aux_index`), a Node-RED button (`docs/node-red-tag-navigation-flow.json`), a block or a script; clearing it stands a running primitive down; it auto-clears on disarm | built, sim |
+| `wait_for_offboard` | the pilot hand-off: returns when armed, airborne, in OFFBOARD and `/dexi/tag_nav/engage` is true; engage comes from an RC aux switch (`engage_aux_index`), a Node-RED button (the `DEXI Tag Navigation` flow in node-red-dexi (`flows/tag_navigation.json`, shipped in the DEXI Node-RED image)), a block or a script; clearing it stands a running primitive down; it auto-clears on disarm | built, sim |
 | `wait_for_tag` | returns when the tag is seen twice in a row | flown |
 | `center_on_tag` (`-1` = whichever tag is in view) | tapered velocity chase to 0.25 m, then PX4 position hold at the tag's measured position, refined per detection; done inside 10 cm for 0.7 s | flown; needs `hold_ned` to reach the gate |
 | `fly_until_tag` | body-frame velocity until the next tag is seen | prototype in the GCS, to port |
@@ -91,7 +91,7 @@ its browser prototype only in the simulator. Node-RED and Python call the same
 two services. A failed block lands the aircraft and reports why.
 
 Node-RED runs server-side on the Pi, so a flow is a mission that needs no laptop
-in the loop. The reference flow (`docs/node-red-tag-navigation-flow.json`) has
+in the loop. The reference flow (the `DEXI Tag Navigation` flow in node-red-dexi (`flows/tag_navigation.json`, shipped in the DEXI Node-RED image)) has
 ONE generic command node, not a node per capability: a function fills the request
 and picks the service from the command name, one `ros2-service-call` executes it,
 and a switch on `success` feeds the result back to a mission function that holds

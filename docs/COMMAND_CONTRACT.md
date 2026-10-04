@@ -64,7 +64,7 @@ JSON, 5 Hz: `state`, `tag`, `visible`, `offset`, `alt`, `engaged`, `armed`,
 
 ## Node-RED
 
-`docs/node-red-tag-navigation-flow.json` is the reference flow. One generic
+the `DEXI Tag Navigation` flow in node-red-dexi (`flows/tag_navigation.json`, shipped in the DEXI Node-RED image) is the reference flow. One generic
 command node (a function that fills the request and picks the service by command
 name, wired to one `ros2-service-call`) executes every command above; the mission
 is a list of steps inside a single function node. Starting a mission: the RC
