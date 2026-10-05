@@ -47,7 +47,7 @@ the aircraft again, so the pilot can re-enter Offboard later without a reset.
 
 | command | parameter | north / east / down | completes when |
 |---|---|---|---|
-| `center_on_tag` | tag id, **-1 = any tag in view** | | held inside 0.25 m of the tag for `hold_accept_s` (8 s), typically 5–10 cm; fails after 8 s without the tag |
+| `center_on_tag` | tag id, **-1 = any tag in view** | | inside 10 cm for 0.7 s, or after `hold_accept_s` (8 s) in hold inside 0.25 m, typically 5–10 cm; fails after 8 s without the tag |
 | `fly_until_tag` | tag id, **-1 = the first tag that was not in view at the start** | body velocity m/s (FRD), e.g. north 0.25 | the tag is seen on 2 consecutive detections after `transit_min_s`; the aircraft is left in a position hold |
 | `wait_for_tag` | tag id | | the tag is in view |
 | `wait_for_offboard` | | | armed, airborne, in OFFBOARD and engaged (`/dexi/tag_nav/engage`, RC aux, or Offboard entry when `engage_on_offboard`) |
@@ -64,7 +64,8 @@ JSON, 5 Hz: `state`, `tag`, `visible`, `offset`, `alt`, `engaged`, `armed`,
 
 ## Node-RED
 
-the `DEXI Tag Navigation` flow in node-red-dexi (`flows/tag_navigation.json`, shipped in the DEXI Node-RED image) is the reference flow. One generic
+The reference flow is `DEXI Tag Navigation` in node-red-dexi
+(`flows/tag_navigation.json`, shipped in the DEXI Node-RED image). One generic
 command node (a function that fills the request and picks the service by command
 name, wired to one `ros2-service-call`) executes every command above; the mission
 is a list of steps inside a single function node. Starting a mission: the RC

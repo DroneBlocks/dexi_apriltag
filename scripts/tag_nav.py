@@ -3,8 +3,9 @@
 
 The DroneBlocks GCS, Python and Node-RED all drive the aircraft through the
 offboard manager. This node adds the tag-relative primitives the same way: it
-reads the detector's TF, decides a body-frame velocity, and hands that to the
-manager with OffboardNavCommand set_velocity_body. It never publishes a
+reads the detector's TF, decides a body-frame velocity or a hold point, and
+hands it to the manager as OffboardNavCommand set_velocity_body or hold_ned.
+It never publishes a
 trajectory setpoint of its own, so the manager stays the single owner of the
 setpoint stream, the heartbeat and the hand-back to the pilot.
 
@@ -19,14 +20,13 @@ Service  /dexi/tag_nav/execute   dexi_interfaces/srv/ExecuteBlocklyCommand
         Returns once the aircraft is armed, airborne, in OFFBOARD and the engage
         flag is set. This is the pilot hand-off: fly to a tag by hand, give the go
         (RC aux switch, Node-RED button, a block, a script), the mission continues.
-Topic    /dexi/tag_nav/engage    std_msgs/Bool  — the go signal, from anyone
+Topic    /dexi/tag_nav/engage    std_msgs/Bool, the go signal, from anyone
 Topic    /dexi/tag_nav/status    std_msgs/String, JSON, 5 Hz
 
 The offset math (camera axes -> body axes -> body origin, mount offset applied
 after the rotation, tag_scale on the raw range) and the chase law (speed
-proportional inside centering_taper_dist, flat outside) are Aziz Beghdadi's from
-apriltag-corridor-mission-code, flown on this airframe. Loss handling follows his
-too: hold over where the tag was last seen (median of >= 3 samples, capped), and
+proportional inside centering_taper_dist, flat outside) come from
+apriltag-corridor-mission-code. Loss handling follows it too: hold over where the tag was last seen (median of >= 3 samples, capped), and
 give up after centering_loss_timeout.
 """
 
@@ -70,10 +70,8 @@ class TagNav(Node):
         p = self.declare_parameter
         # Mount. DEXI 5 v1 (ARK Pi6X + CM4): lens center 105 mm ahead
         # of the frame center, on the centerline, camera axes aligned with body
-        # forward/right. Tape-measured 2026-10-01; bench check with the tag
-        # centered in the image read 3 cm, so the mount pitch is a true 90 deg.
-        # (The corridor flights used 0.1524 and carried a ~5 cm centering bias.)
-        # Per airframe: measure, never copy.
+        # forward/right. A bench check with the tag centered in the image read
+        # 3 cm, so the mount pitch is a true 90 deg. Per airframe: measure, never copy.
         p('camera_forward_offset', 0.105)
         p('camera_right_offset', 0.0)
         p('camera_yaw_deg', 0.0)
@@ -82,20 +80,18 @@ class TagNav(Node):
         # Chase law
         p('centering_speed', 0.20)        # m/s, flat outside the taper
         p('centering_taper_dist', 0.30)   # m, proportional inside
-        # Floor on the chase speed outside the gate. Flown on a DEXI 5 v1:
-        # with no floor the aircraft parked 14 cm off for 20 s on 0.06-0.09 m/s
-        # commands, which a flow EKF cannot distinguish from noise.
-        p('centering_min_speed', 0.0)     # m/s floor during the chase; 0 = off. A 0.15 floor limit-cycled ±0.2 m on 2026-10-01.
-        # Two-stage centering (Aziz's CENTERING -> HOLDING): chase on velocity until
+        # Floor on the chase speed outside the gate. Without one the aircraft can
+        # park ~14 cm off on 0.06-0.09 m/s commands, which a flow EKF cannot tell
+        # from noise; a 0.15 m/s floor limit-cycles ±0.2 m. Off by default.
+        p('centering_min_speed', 0.0)     # m/s floor during the chase; 0 = off
+        # Two-stage centering (CENTERING -> HOLDING): chase on velocity until
         # inside hold_enter, then hand the fine centering to PX4's position hold at
         # the tag's measured position, refined from every new detection.
         p('hold_enter', 0.25)             # m, switch to position hold inside this
         p('hold_exit', 0.40)              # m, drop back to the chase outside this
         p('hold_alpha', 0.8)              # EMA weight on the previous hold target (first fix only)
         # Hold refinement is integral, not "position + offset": on flow PX4 parks a
-        # steady ~10 cm from the setpoint it is given (flown 2026-10-02: camera kept
-        # reading 8 cm behind / 8 cm right while the hold point stood still), so the
-        # hold point is nudged by a fraction of what the camera still sees until the
+        # steady ~10 cm from the setpoint it is given, so the hold point is nudged by a fraction of what the camera still sees until the
         # camera reads zero. hold_nudge is that fraction per new detection.
         p('hold_nudge', 0.25)
         # Rate limit on the hold point: 0.012 m per detection at ~8 Hz is ~0.1 m/s, slow
@@ -104,18 +100,16 @@ class TagNav(Node):
         # Anti-windup: only nudge once PX4 has settled on the point it was last given,
         # i.e. the aircraft is within hold_settled_m of the target and moving slower
         # than hold_settled_v. Nudging while it is still in transit piles corrections
-        # on top of motion and the hold point runs away (SITL regression, 2026-10-02).
-        # Flown 2026-10-02: on flow PX4 parks 10-18 cm from its setpoint with the EKF
-        # reporting ~0.1 m/s while nearly still, so a tight gate never opens. Gate only
-        # against real motion; the rate limit above is what prevents windup.
-        # 2026-10-02 evening: with v-gate 0.30 the aircraft orbited the tag at 0.15-0.2 m/s
-        # and the hold point chased it (phase lag). Integrate only when quasi-still.
+        # on top of motion and the hold point runs away. The distance gate is loose
+        # because on flow PX4 parks 10-18 cm from its setpoint. The speed gate is
+        # tight because at 0.30 m/s the hold point chases an aircraft orbiting the
+        # tag at 0.15-0.2 m/s (phase lag): integrate only when quasi-still.
         p('hold_settled_m', 0.35)
         p('hold_settled_v', 0.12)
         p('hold_accept_s', 8.0)           # s in hold, inside hold_enter, to accept without reaching the gate
         # Manager command used for the hold point. 'hold_ned' is a pure position
         # setpoint; 'goto_ned' declares arrival at 0.25 m and re-latches the hold at
-        # the current position, which parks the aircraft ~20 cm off (2026-10-01).
+        # the current position, which parks the aircraft ~20 cm off.
         p('hold_command', 'hold_ned')
         p('centering_gate', 0.10)         # m, centered when the offset is inside this
         p('centering_settle', 0.7)        # s inside the gate before reporting done
@@ -142,7 +136,7 @@ class TagNav(Node):
         p('transit_min_s', 0.5)           # fly_until_tag: ignore sightings before this, so the tag being left cannot retrigger
         p('transit_confirm', 2)           # consecutive ticks the next tag must be seen
         p('loop_hz', 20.0)
-        p('local_position_topic', '')  # '' = /fmu/out/vehicle_local_position (100 Hz). The launch file points this at a 20 Hz throttled copy: every PX4 message wakes rclpy's pure-Python wait-set rebuild, 100 Hz cost ~70% of a CM4 core at idle
+        p('local_position_topic', '')  # '' = /fmu/out/vehicle_local_position (100 Hz); the launch file uses the manager's 20 Hz copy
         p('command_hz', 10.0)
 
         g = self.get_parameter
@@ -210,7 +204,7 @@ class TagNav(Node):
         fmu = self._fmu_prefix()
         # rclpy registers two QoS event handlers per subscription/publisher by default and
         # rebuilds the wait set on every wake; with a 100 Hz position stream that spin cost
-        # 83% of a CM4 core while idle (py-spy 2026-10-03: zero time in our own code).
+        # 83% of a CM4 core while idle, none of it in this node's own code.
         NO_EVENTS = dict(event_callbacks=SubscriptionEventCallbacks(use_default_callbacks=False))
         NO_PUB_EVENTS = dict(event_callbacks=PublisherEventCallbacks(use_default_callbacks=False))
         self.create_subscription(VehicleLocalPosition, self.local_position_topic or f'{fmu}/vehicle_local_position',
@@ -251,17 +245,9 @@ class TagNav(Node):
             f'yaw {g("camera_yaw_deg").value:.0f} deg, chase {self.centering_speed} m/s taper {self.taper} m '
             f'gate {self.gate} m, dry_run={self.dry_run}, require_airborne={self.require_airborne}')
 
-    # ─── PX4 plumbing ────────────────────────────────────────────────────
+    # ----- PX4 plumbing -----
     def _fmu_prefix(self):
         return '/fmu/out'
-
-    def _status_topic(self, fmu):
-        # PX4 1.16 publishes a versioned status topic next to the plain one on
-        # some boards; prefer the plain name, fall back to _v1 if only that exists.
-        names = {n for n, _ in self.get_topic_names_and_types()}
-        if f'{fmu}/vehicle_status' in names or f'{fmu}/vehicle_status_v1' not in names:
-            return f'{fmu}/vehicle_status'
-        return f'{fmu}/vehicle_status_v1'
 
     def _on_local_position(self, m):
         with self.lock:
@@ -331,7 +317,7 @@ class TagNav(Node):
         c, s = math.cos(self.heading), math.sin(self.heading)
         return dn * c + de * s, -dn * s + de * c
 
-    # ─── Tag offset (Aziz's get_tag_position, trimmed to what centering needs) ──
+    # ----- Tag offset -----
     def tag_offset(self, tag_id, job):
         """Body-frame offset to the tag: (forward, right, down) in meters, or None."""
         frame = f'{self.tag_family}:{tag_id}'
@@ -348,8 +334,8 @@ class TagNav(Node):
         down = tr.x * self.tag_scale
         # Stale-TF detection by the transform's own stamp: lookup keeps returning
         # the last pose after the tag leaves the frame, so a stamp that stops
-        # advancing for tag_stale_s means the tag is gone. (Comparing values, as
-        # tag_hop did, mistakes a perfectly still aircraft on a bench for a lost tag.)
+        # advancing for tag_stale_s means the tag is gone. (Comparing values would
+        # mistake a perfectly still aircraft on a bench for a lost tag.)
         now = time.time()
         stamp = t.header.stamp.sec + t.header.stamp.nanosec * 1e-9
         if job['last_raw'] is not None and stamp <= job['last_raw'] + 1e-6:
@@ -362,7 +348,7 @@ class TagNav(Node):
         job['last_raw'] = stamp
         return fwd, right, down
 
-    # ─── Commands to the manager ─────────────────────────────────────────
+    # ----- Commands to the manager -----
     def send_velocity(self, vx, vy, vz, force=False):
         now = time.time()
         if not force and now - self.last_cmd_time < self.command_period:
@@ -377,7 +363,7 @@ class TagNav(Node):
         self.cmd_pub.publish(m)
 
     def send_goto(self, n, e, d, yaw_deg, force=False):
-        """Position hold at an NED point through the manager (its goto_ned)."""
+        """Position hold at an NED point through the manager (hold_command)."""
         now = time.time()
         if not force and now - self.last_goto_time < 0.2:      # 5 Hz is plenty for a refined hold point
             return
@@ -402,7 +388,7 @@ class TagNav(Node):
         """Hold height over the tag. While the tag is in view its measured range is
         the reference; when it is not, the EKF bridges from the last sighting.
         (The EKF height alone is not trustworthy here: with the rangefinder not
-        fused it is baro, and it read 0.4 m low on 2026-10-01.)"""
+        fused it is baro, which can read 0.4 m low.)"""
         if not self.hold_altitude:
             return 0.0
         ekf = self.altitude()
@@ -421,7 +407,7 @@ class TagNav(Node):
         err = alt - job['hold_alt']                        # positive = too high
         return max(-self.alt_max_rate, min(self.alt_max_rate, self.alt_kz * err))   # NED: down positive
 
-    # ─── Service ─────────────────────────────────────────────────────────
+    # ----- Service -----
     def _on_execute(self, req, res):
         t0 = time.time()
         if self.job is not None:
@@ -525,7 +511,7 @@ class TagNav(Node):
         if not quiet: self.get_logger().info(f'gates ok ({snap})')
         return True, ''
 
-    # ─── Control loop ────────────────────────────────────────────────────
+    # ----- Control loop -----
     def _finish(self, job, success, message, keep_hold=False):
         # On success out of HOLD the manager is left holding the tag position, so
         # whatever block follows (a wait, a hop) starts from a real position hold
@@ -656,7 +642,7 @@ class TagNav(Node):
             return self._finish(job, True, f'holding on tag {job["tag_id"]}: {raw_mag * 100:.0f} cm', keep_hold=True)
 
         if job['mode'] == 'hold':
-            # Refine the hold point from every new detection (EMA, as tag_hop did)
+            # Refine the hold point from every new detection
             if job['new_sample'] or job['target'] is None:
                 tn, te = self.body_to_ned(fwd, right)
                 new_n, new_e = self.pos[0] + tn, self.pos[1] + te

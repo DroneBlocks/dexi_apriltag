@@ -8,13 +8,13 @@ drive the aircraft through the same command list.
 ```
  Layer 4  Interface      DroneBlocks blocks · Python · Node-RED
                          one service contract: ExecuteBlocklyCommand
- ──────────────────────────────────────────────────────────────────────
+ ----------------------------------------------------------------------
  Layer 3  Perception     tag_nav (dexi_apriltag)
           primitives     wait_for_tag · center_on_tag · fly_until_tag · land_on_tag · go_to_tag
- ──────────────────────────────────────────────────────────────────────
- Layer 2  Control        px4_offboard_manager (dexi_offboard)  — the ONLY setpoint owner
+ ----------------------------------------------------------------------
+ Layer 2  Control        px4_offboard_manager (dexi_offboard), the only setpoint owner
                          body-relative · velocity · absolute (goto_ned, hold_ned)
- ──────────────────────────────────────────────────────────────────────
+ ----------------------------------------------------------------------
  Layer 1  Estimation     PX4 EKF2
           flow profile:  optical flow + rangefinder          (relative NED, drifts)
           fusion profile: + apriltag_odometry → external vision (absolute in the tag map)
@@ -29,10 +29,10 @@ both; tags only add absolute position and heading while a mapped tag is in view.
 
 | Piece | Where | Status |
 |---|---|---|
-| `apriltag_node` detector, tag TFs | `dexi_bringup` | in bringup; CM4 feed raised 2 → 10 Hz |
+| `apriltag_node` detector, tag TFs | `dexi_bringup` | in bringup; CM4 feed at 10 Hz |
 | `apriltag_odometry` tag poses + map → external vision | `dexi_apriltag/src/apriltag_odometry.cpp` | exists (PR #3); needs the 0.105 m mount offset and the shared tag map |
 | Profiles | `px4-web-configurator` | exist; need a switch reachable from the GCS |
-| Tag map | one YAML shared by odometry and `tag_nav` | to do (today each would carry its own) |
+| Tag map | one YAML shared by odometry and `tag_nav` | `config/tag_map_avr2026_*.yaml`; odometry does not read it yet |
 
 A new positioning system is a new Layer 1 source. Nothing above changes. PX4
 takes one external-vision source at a time, so tags plus UWB together means a
@@ -48,19 +48,19 @@ and the hand-back to the pilot. Nothing else publishes `/fmu/in/trajectory_setpo
 | body-relative | `fly_forward/backward/left/right/up/down`, `yaw_left/right` | flow and fusion |
 | velocity | `set_velocity_body`, `stop_velocity` | flow and fusion |
 | hand-off | `start_setpoint_stream` (stream only; follows the aircraft until Offboard is entered, then latches) | flow and fusion |
-| absolute | `goto_ned`, `hold_ned` (to add) | fusion; briefly on flow |
+| absolute | `goto_ned`, `hold_ned` | fusion; briefly on flow |
 
-Two additions this framework needs from the manager:
+Two manager features exist for Layer 3:
 
 - `hold_ned`: a pure position setpoint. `goto_ned` declares arrival at 0.25 m and
   re-latches the hold point at the current position, so no outer loop can close
-  the last 20 cm through it (measured 2026-10-01: five centerings, all 19–24 cm).
-- a status topic: control mode, target, whether a target is active, heartbeat
-  on/off, setpoints paused. Today Layer 3 and the GCS are blind to it.
+  the last 20 cm through it (five centerings through `goto_ned` all ended 19–24 cm off).
+- `/dexi/offboard_manager/status`: control mode, target, whether a target is
+  active, heartbeat on/off, setpoints paused.
 
-Also noted: velocity mode has no altitude hold of its own (Layer 3 compensates),
-and the manager's internals are a candidate for PX4's ROS 2 Interface Library
-(register as a real flight mode) once `hold_ned` and status exist.
+Velocity mode has no altitude hold of its own (Layer 3 compensates). The
+manager's internals are a candidate for PX4's ROS 2 Interface Library (register
+as a real flight mode).
 
 ## Layer 3: perception primitives
 
@@ -71,10 +71,10 @@ drives Layer 2 by velocity or hold. It never publishes a setpoint. Service
 
 | Command | What it does | Status |
 |---|---|---|
-| `wait_for_offboard` | the pilot hand-off: returns when armed, airborne, in OFFBOARD and `/dexi/tag_nav/engage` is true; engage comes from an RC aux switch (`engage_aux_index`), a Node-RED button (the `DEXI Tag Navigation` flow in node-red-dexi (`flows/tag_navigation.json`, shipped in the DEXI Node-RED image)), a block or a script; clearing it stands a running primitive down; it auto-clears on disarm | built, sim |
+| `wait_for_offboard` | the pilot hand-off: returns when armed, airborne, in OFFBOARD and `/dexi/tag_nav/engage` is true; engage comes from an RC aux switch (`engage_aux_index`), a Node-RED button (`flows/tag_navigation.json` in node-red-dexi), a block or a script; clearing it stands a running primitive down; it auto-clears on disarm | built, sim |
 | `wait_for_tag` | returns when the tag is seen twice in a row | flown |
-| `center_on_tag` (`-1` = whichever tag is in view) | tapered velocity chase to 0.25 m, then PX4 position hold at the tag's measured position, refined per detection; done inside 10 cm for 0.7 s | flown; needs `hold_ned` to reach the gate |
-| `fly_until_tag` | body-frame velocity until the next tag is seen | prototype in the GCS, to port |
+| `center_on_tag` (`-1` = whichever tag is in view) | tapered velocity chase to 0.25 m, then PX4 position hold at the tag's measured position, refined per detection; done inside 10 cm for 0.7 s | flown |
+| `fly_until_tag` | body-frame velocity until the next tag is seen | built |
 | `land_on_tag` | center, descend holding center, hand off to PX4 land on centering error and speed | prototype in the GCS, to port |
 | `go_to_tag` | map lookup → `goto_ned` → `center_on_tag` | fusion only, to do |
 
@@ -91,13 +91,13 @@ its browser prototype only in the simulator. Node-RED and Python call the same
 two services. A failed block lands the aircraft and reports why.
 
 Node-RED runs server-side on the Pi, so a flow is a mission that needs no laptop
-in the loop. The reference flow (the `DEXI Tag Navigation` flow in node-red-dexi (`flows/tag_navigation.json`, shipped in the DEXI Node-RED image)) has
-ONE generic command node, not a node per capability: a function fills the request
+in the loop. The reference flow (`DEXI Tag Navigation`,
+`flows/tag_navigation.json` in node-red-dexi) has ONE generic command node, not a node per capability: a function fills the request
 and picks the service from the command name, one `ros2-service-call` executes it,
 and a switch on `success` feeds the result back to a mission function that holds
 the steps as data. Hand-off, ENGAGE button and START injects all converge on the
-same mission node. Verified in the simulator 2026-10-02: hand-off → center tag 0
-(5 cm) → fly until the next tag → center (7 cm) → fly → center (8 cm) → land.
+same mission node. In the simulator the reference mission (hand-off → center →
+fly until the next tag → center → ... → land) centers within 5–8 cm.
 
 ## Student progression
 
@@ -107,14 +107,11 @@ profile is on. Every block behaves the same in the corridor sim and on the aircr
 
 ## Gaps, in order
 
-1. `hold_ned` + tolerance parameter in the manager.
-2. Manager status topic.
-3. One tag-map YAML for `apriltag_odometry` and `tag_nav` (`config/tag_map_avr2026_*.yaml` added; odometry still reads `tag_map_ids/x/y` params, to be loaded from it).
-3b. Mount offset in one place. Today `tag_nav` applies it node-side, because the bringup's `base_link -> camera` transform is pitch-only and not a true optical-to-body rotation, so a body-forward translation written into it lands on the wrong axis. The right fix is a correct FRD transform in bringup, after which every consumer (`apriltag_odometry`, `tag_hop`, `precision_landing`, `tag_nav`) gets the mount for free and the node-side offsets go to zero. That is a frame change for all of them, so it gets its own retest.
-4. `fly_until_tag`, `land_on_tag`, then `go_to_tag` in `tag_nav`.
-5. Profile switch in the GCS.
-6. Tag transforms in the SITL bringup (done 2026-10-01 in `dexi_bringup_unity_sim.launch.py`) so all of the above runs in the corridor sim first.
-7. Yaw to the tag during the hold (tag yaw from the camera-to-tag rotation, slewed, locked inside 0.4 m).
+1. One tag-map YAML for `apriltag_odometry` and `tag_nav` (`config/tag_map_avr2026_*.yaml`; odometry still reads `tag_map_ids/x/y` params, to be loaded from it).
+2. Mount offset in one place. `tag_nav` applies it node-side, because the bringup's `base_link -> camera` transform is pitch-only and not a true optical-to-body rotation, so a body-forward translation written into it lands on the wrong axis. The right fix is a correct FRD transform in bringup, after which every consumer (`apriltag_odometry`, `tag_hop`, `precision_landing`, `tag_nav`) gets the mount for free and the node-side offsets go to zero. That is a frame change for all of them, so it gets its own retest.
+3. `land_on_tag`, then `go_to_tag` in `tag_nav`.
+4. Profile switch in the GCS.
+5. Yaw to the tag during the hold (tag yaw from the camera-to-tag rotation, slewed, locked inside 0.4 m).
 
 ## Measured on a DEXI 5 v1 (ARK Pi6X + CM4)
 

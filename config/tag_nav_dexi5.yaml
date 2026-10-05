@@ -3,8 +3,8 @@
 tag_nav:
   ros__parameters:
     # Mount: lens center 105 mm ahead of the frame center, on the centerline,
-    # camera axes aligned with body forward/right (tape-measured 2026-10-01; a
-    # bench check with the tag centered in the image read 3 cm).
+    # camera axes aligned with body forward/right (a bench check with the tag
+    # centered in the image read 3 cm).
     camera_forward_offset: 0.105
     camera_right_offset: 0.0
     camera_yaw_deg: 0.0
@@ -45,7 +45,7 @@ tag_nav:
     min_airborne_alt: 0.30
     require_offboard: true
     dry_run: false
-    # Hand-off from RC: aux channel index (1..6, 0 = none). The original corridor script used aux2 (= RC channel 9).
+    # Hand-off from RC: aux channel index (1..6, 0 = none); aux2 is RC channel 9.
     engage_aux_index: 0   # one engage path: the Offboard switch (RC_MAP_OFFB_SW); aux-channel engage off
     engage_aux_threshold: 0.5
     # ch7 is the PX4 offboard switch (RC_MAP_OFFB_SW=7); entering Offboard is the go.

@@ -34,10 +34,10 @@ tag_nav:
     min_airborne_alt: 0.30
     require_offboard: true
     dry_run: false
-    # Hand-off from RC: aux channel index (1..6, 0 = none). The original corridor script used aux2 (= RC channel 9).
+    # Hand-off from RC: aux channel index (1..6, 0 = none); aux2 is RC channel 9.
     engage_aux_index: 0
     engage_aux_threshold: 0.5
-    # ch7 is the PX4 offboard switch (RC_MAP_OFFB_SW=7); entering Offboard is the go.
+    # true: entering Offboard (RC_MAP_OFFB_SW) counts as engage.
     engage_on_offboard: false
     transit_min_s: 0.5
     transit_confirm: 2
