@@ -377,6 +377,24 @@ sudo pkill -9 -f apriltag_odometry
 - **DEXI-3 (CM5 + H743-AIO + Arducam fixed-focus IMX708)**, indoor, PX4 v1.17.0, optical flow + range sensor (no GPS)
 - Single-tag hold (`tag_hold.launch.py`, 167 mm tag 0) engaged and held via the range-sensor airborne gate
 
+## Python examples
+
+`examples/python/` holds short scripts that call tag_nav's service, the same commands the
+DroneBlocks AprilTag blocks and the Node-RED tag navigation nodes use.
+
+| Script | What it does |
+|---|---|
+| `hop_to_next_tag.py` | Take off over tag 0, center, fly forward until tag 1, center, land on tag 1 |
+
+Start on the ground over tag 0 with the nose toward tag 1 ("forward" is relative to the nose), then:
+
+```bash
+python3 ~/dexi_ws/src/dexi_apriltag/examples/python/hop_to_next_tag.py
+```
+
+If a step fails while the mission has the aircraft (Offboard), the script lands. If the pilot
+has taken over, it does not.
+
 ## tag_nav.py
 
 AprilTag navigation primitives behind one service, for DroneBlocks, Python and
