@@ -1,32 +1,43 @@
 # DEXI command contract
 
 Every interface (DroneBlocks blocks, Python, Node-RED) drives the aircraft through
-one request type and two services. Nothing else is needed to fly a mission.
+two services, one per node. Nothing else is needed to fly a mission.
 
 ```
-dexi_interfaces/srv/ExecuteBlocklyCommand
-  request:  command (string)  parameter (float)  timeout (s, 0 = none)
-            north east down yaw (float)     index r g b (int, LEDs only)
+dexi_interfaces/srv/FlightCommand           /dexi/flight/command
+  request:  command (string)  value (float)  timeout (s, 0 = none)
+            north east down yaw (float)
+  response: success (bool)  message (string)  execution_time (s)
+
+dexi_interfaces/srv/TagNavCommand           /dexi/tag_nav/command
+  request:  command (string)  tag_id (int, -1 = any)  hold_s (s)  timeout (s)
+            forward right down (float, body velocity m/s)
   response: success (bool)  message (string)  execution_time (s)
 ```
 
 | Service | Owner | Commands |
 |---|---|---|
-| `/dexi/execute_blockly_command` | `dexi_offboard` `px4_offboard_manager` | flight, body-relative moves, absolute NED, hand-off stream |
-| `/dexi/tag_nav/execute` | `dexi_apriltag` `tag_nav` | perception primitives (AprilTags) |
+| `/dexi/flight/command` | `dexi_offboard` `px4_offboard_manager` | flight, body-relative moves, absolute NED, hand-off stream |
+| `/dexi/tag_nav/command` | `dexi_apriltag` `tag_nav` | perception primitives (AprilTags) |
+
+The old names, `/dexi/execute_blockly_command` and `/dexi/tag_nav/execute` (both
+`ExecuteBlocklyCommand`), still answer with the same behavior so existing scripts
+keep working; they will be removed in a later release. On `/dexi/tag_nav/execute`
+the tag id is `parameter`, the body velocity is `north`/`east`/`down`, and
+`hold_on_tag` takes its hold time in `timeout`.
 
 Both services block until the command completes or `timeout` elapses, and answer
 `success=false` with a reason instead of raising. A client (the flow, a block, a
 script) sends the next command only after the previous one answered.
 
-## `/dexi/execute_blockly_command`
+## `/dexi/flight/command`
 
-| command | parameter | north / east / down / yaw | completes when |
+| command | value | north / east / down / yaw | completes when |
 |---|---|---|---|
-| `arm` / `disarm` | | | PX4 confirms |
+| `arm` / `disarm` | | | PX4 confirms; fails if PX4 refuses (for example, disarm in the air) |
 | `takeoff` | altitude m | | altitude reached (PX4 native takeoff) |
 | `offboard_takeoff` | altitude m | | altitude reached in Offboard |
-| `land` | | | landed and disarmed |
+| `land` | | | PX4's land detector reports landed (or the vehicle disarmed) |
 | `fly_forward` `fly_backward` `fly_left` `fly_right` `fly_up` `fly_down` | distance m | | within `position_tolerance` (0.25 m) of the body-relative target |
 | `yaw_left` `yaw_right` | degrees | | within `heading_tolerance` |
 | `goto_ned` | | target N E D (m), yaw (deg) | within tolerance, then the hold re-latches on arrival |
@@ -43,14 +54,15 @@ Leaving Offboard: with `start_offboard_heartbeat` the stream stops (the pilot ha
 the aircraft). With `start_setpoint_stream` the stream keeps running and follows
 the aircraft again, so the pilot can re-enter Offboard later without a reset.
 
-## `/dexi/tag_nav/execute`
+## `/dexi/tag_nav/command`
 
-| command | parameter | north / east / down | completes when |
+| command | tag_id | other fields | completes when |
 |---|---|---|---|
-| `center_on_tag` | tag id, **-1 = any tag in view** | | inside 10 cm for 0.7 s, or after `hold_accept_s` (8 s) in hold inside 0.25 m, typically 5–10 cm; fails after 8 s without the tag |
-| `fly_until_tag` | tag id, **-1 = the first tag that was not in view at the start** | body velocity m/s (FRD), e.g. north 0.25 | the tag is seen on 2 consecutive detections after `transit_min_s`; the aircraft is left in a position hold |
-| `wait_for_tag` | tag id | | the tag is in view |
-| `wait_for_offboard` | | | armed, airborne, in OFFBOARD and engaged (`/dexi/tag_nav/engage`, RC aux, or Offboard entry when `engage_on_offboard`) |
+| `center_on_tag` | **-1 = any tag in view** | | inside 10 cm for 0.7 s, or after `hold_accept_s` (8 s) in hold inside 0.25 m, typically 5–10 cm; fails after 8 s without the tag |
+| `hold_on_tag` | **-1 = any tag in view** | `hold_s`: seconds to stay | stayed centered for `hold_s`, correcting from the tag; fails if the tag is lost longer than `centering_loss_timeout` |
+| `fly_until_tag` | **-1 = the first tag that was not in view at the start** | `forward` `right` `down`: body velocity m/s, e.g. forward 0.25 | the tag is seen on 2 consecutive detections after `transit_min_s`; the aircraft is left in a position hold |
+| `wait_for_tag` | the tag | | the tag is in view |
+| `wait_for_offboard` | ignored | | armed, airborne, in OFFBOARD and engaged (`/dexi/tag_nav/engage`, RC aux, or Offboard entry when `engage_on_offboard`) |
 
 Gates on every `tag_nav` command: airborne (rangefinder, or EKF height while
 armed) and in OFFBOARD. Leaving OFFBOARD or clearing engage stands the node down
