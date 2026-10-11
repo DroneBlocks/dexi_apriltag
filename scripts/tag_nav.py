@@ -9,20 +9,23 @@ It never publishes a
 trajectory setpoint of its own, so the manager stays the single owner of the
 setpoint stream, the heartbeat and the hand-back to the pilot.
 
-Service  /dexi/tag_nav/execute   dexi_interfaces/srv/ExecuteBlocklyCommand
-    command=center_on_tag   parameter=<tag id, -1 = whichever tag is in view>  timeout=<s>
-    command=hold_on_tag     parameter=<tag id, -1 = whichever tag is in view>  timeout=<hold s>
-        Stays centered over the tag for that many seconds, correcting from the tag the
+Service  /dexi/tag_nav/command   dexi_interfaces/srv/TagNavCommand
+    command=center_on_tag   tag_id=<id, -1 = whichever tag is in view>  timeout=<s>
+    command=hold_on_tag     tag_id=<id, -1 = whichever tag is in view>  hold_s=<s>
+        Stays centered over the tag for hold_s seconds, correcting from the tag the
         whole time, then succeeds. Fails if the tag is lost longer than centering_loss_timeout.
-    command=wait_for_tag    parameter=<tag id, -1 = any>  timeout=<s>
-    command=fly_until_tag   parameter=<tag id, -1 = any tag other than those in view at start>
-                            north/east/down = body velocity (m/s, FRD)  timeout=<s>
+    command=wait_for_tag    tag_id=<id, -1 = any>  timeout=<s>
+    command=fly_until_tag   tag_id=<id, -1 = any tag other than those in view at start>
+                            forward/right/down = body velocity (m/s)  timeout=<s>
         Flies at that velocity, holding height, and stops the moment the tag is seen
         twice in a row. The corridor hop: fly forward until the next tag, then center.
-    command=wait_for_offboard  parameter=ignored  timeout=<s>
+    command=wait_for_offboard  tag_id=ignored  timeout=<s>
         Returns once the aircraft is armed, airborne, in OFFBOARD and the engage
         flag is set. This is the pilot hand-off: fly to a tag by hand, give the go
         (RC aux switch, Node-RED button, a block, a script), the mission continues.
+Service  /dexi/tag_nav/execute   dexi_interfaces/srv/ExecuteBlocklyCommand
+    The old name and type, kept for existing scripts: parameter = tag id,
+    north/east/down = body velocity, and hold_on_tag takes the hold time in timeout.
 Topic    /dexi/tag_nav/engage    std_msgs/Bool, the go signal, from anyone
 Topic    /dexi/tag_nav/status    std_msgs/String, JSON, 5 Hz
 
@@ -51,7 +54,9 @@ except ImportError:  # Humble
     from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 
 from dexi_interfaces.msg import OffboardNavCommand
-from dexi_interfaces.srv import ExecuteBlocklyCommand
+from types import SimpleNamespace
+
+from dexi_interfaces.srv import ExecuteBlocklyCommand, TagNavCommand
 from apriltag_msgs.msg import AprilTagDetectionArray
 from px4_msgs.msg import ManualControlSetpoint, VehicleLocalPosition, VehicleStatus
 from std_msgs.msg import Bool, String
@@ -235,6 +240,8 @@ class TagNav(Node):
         # use_global_arguments=False: the launch remaps __node:=tag_nav for the whole process,
         # which would rename this node too and leave two nodes called 'tag_nav'.
         self.svc_node = Node('tag_nav_execute', use_global_arguments=False)
+        self.svc_node.create_service(TagNavCommand, '/dexi/tag_nav/command', self._on_command)
+        # The old name and type, kept so existing scripts and lessons still work.
         self.svc_node.create_service(ExecuteBlocklyCommand, '/dexi/tag_nav/execute', self._on_execute)
 
         # Active job, driven by the control timer
@@ -414,13 +421,29 @@ class TagNav(Node):
         return max(-self.alt_max_rate, min(self.alt_max_rate, self.alt_kz * err))   # NED: down positive
 
     # ----- Service -----
+    def _on_command(self, req, res):
+        return self._run(SimpleNamespace(
+            command=req.command, tag_id=int(req.tag_id), hold_s=float(req.hold_s),
+            forward=float(req.forward), right=float(req.right), down=float(req.down),
+            timeout=float(req.timeout)), res)
+
     def _on_execute(self, req, res):
+        # Old ExecuteBlocklyCommand layout: parameter = tag id, north/east/down = body
+        # velocity, and for hold_on_tag the timeout field carries the hold time.
+        hold = req.command.strip() == 'hold_on_tag'
+        return self._run(SimpleNamespace(
+            command=req.command, tag_id=int(round(req.parameter)),
+            hold_s=float(req.timeout) if hold else 0.0,
+            forward=float(req.north), right=float(req.east), down=float(req.down),
+            timeout=0.0 if hold else float(req.timeout)), res)
+
+    def _run(self, req, res):
         t0 = time.time()
         if self.job is not None:
             res.success, res.message = False, f'busy with {self.job["command"]}'
             return res
         cmd = req.command.strip()
-        tag_id = int(round(req.parameter))
+        tag_id = req.tag_id
         timeout = req.timeout if req.timeout > 0 else 30.0
         if cmd not in ('center_on_tag', 'hold_on_tag', 'wait_for_tag', 'wait_for_offboard', 'fly_until_tag'):
             res.success, res.message = False, f'unknown command {cmd}'
@@ -468,16 +491,16 @@ class TagNav(Node):
             self.get_logger().info(f'{cmd} any -> tag {tag_id}')
         if cmd == 'fly_until_tag' and req.timeout <= 0:
             timeout = 20.0
-        # hold_on_tag: timeout carries the hold time. The job gets room past it so the
-        # hold, not the job timeout, decides when it ends.
-        hold_s = (req.timeout if req.timeout > 0 else 1.0) if cmd == 'hold_on_tag' else 0.0
+        # hold_on_tag: the job gets room past the hold so the hold, not the job
+        # timeout, decides when it ends.
+        hold_s = (req.hold_s if req.hold_s > 0 else 1.0) if cmd == 'hold_on_tag' else 0.0
         if cmd == 'hold_on_tag':
             timeout = hold_s + self.loss_timeout + 5.0
         with self.lock:
             ids_at_start = set(self.detected_ids) if time.time() - self.detected_ms < 1.0 else set()
         job = {
             'command': cmd, 'tag_id': tag_id, 'timeout': timeout, 't0': t0,
-            'vel': (float(req.north), float(req.east), float(req.down)), 'exclude': ids_at_start,
+            'vel': (req.forward, req.right, req.down), 'exclude': ids_at_start,
             'done': threading.Event(), 'success': False, 'message': '',
             'fx': deque(maxlen=self.filter_length), 'fy': deque(maxlen=self.filter_length),
             'last_raw': None, 'last_change': t0, 'new_sample': False,
@@ -488,7 +511,7 @@ class TagNav(Node):
             'hold_s': hold_s,
         }
         if cmd == 'fly_until_tag':
-            self.get_logger().info(f'fly_until_tag {tag_id if tag_id >= 0 else "any"}: body vel ({req.north:+.2f}, {req.east:+.2f}, {req.down:+.2f}) m/s, timeout {timeout:.0f} s, ignoring {sorted(ids_at_start)} at start')
+            self.get_logger().info(f'fly_until_tag {tag_id if tag_id >= 0 else "any"}: body vel ({req.forward:+.2f}, {req.right:+.2f}, {req.down:+.2f}) m/s, timeout {timeout:.0f} s, ignoring {sorted(ids_at_start)} at start')
         elif cmd == 'hold_on_tag':
             self.get_logger().info(f'hold_on_tag {tag_id} for {hold_s:.1f} s')
         else:
