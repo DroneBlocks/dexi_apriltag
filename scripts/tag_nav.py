@@ -11,6 +11,9 @@ setpoint stream, the heartbeat and the hand-back to the pilot.
 
 Service  /dexi/tag_nav/execute   dexi_interfaces/srv/ExecuteBlocklyCommand
     command=center_on_tag   parameter=<tag id, -1 = whichever tag is in view>  timeout=<s>
+    command=hold_on_tag     parameter=<tag id, -1 = whichever tag is in view>  timeout=<hold s>
+        Stays centered over the tag for that many seconds, correcting from the tag the
+        whole time, then succeeds. Fails if the tag is lost longer than centering_loss_timeout.
     command=wait_for_tag    parameter=<tag id, -1 = any>  timeout=<s>
     command=fly_until_tag   parameter=<tag id, -1 = any tag other than those in view at start>
                             north/east/down = body velocity (m/s, FRD)  timeout=<s>
@@ -195,6 +198,7 @@ class TagNav(Node):
         self.pos_time = 0.0
         self.nav_state = -1
         self.armed = False
+        self.arm_z = None        # EKF z when the aircraft armed; height is measured from here
         self.engaged = False
         self.engage_changed = 0.0
         self.aux_was_high = False
@@ -265,7 +269,9 @@ class TagNav(Node):
             entered_offboard = m.nav_state == NAV_STATE_OFFBOARD and self.nav_state != NAV_STATE_OFFBOARD
             self.nav_state = m.nav_state
             now_armed = m.arming_state == VehicleStatus.ARMING_STATE_ARMED
-            ekf_alt = -self.pos[2] if self.pos else 0.0
+            if now_armed and not was_armed:
+                self.arm_z = self.pos[2] if self.pos else None
+            ekf_alt = self._height_above_arming()
             airborne = (self.dist_bottom_valid and (self.dist_bottom or 0.0) > self.min_airborne_alt) or (now_armed and ekf_alt > self.min_airborne_alt)
             if entered_offboard and self.engage_on_offboard and not self.engaged and now_armed and airborne:
                 self.engaged = True
@@ -416,7 +422,7 @@ class TagNav(Node):
         cmd = req.command.strip()
         tag_id = int(round(req.parameter))
         timeout = req.timeout if req.timeout > 0 else 30.0
-        if cmd not in ('center_on_tag', 'wait_for_tag', 'wait_for_offboard', 'fly_until_tag'):
+        if cmd not in ('center_on_tag', 'hold_on_tag', 'wait_for_tag', 'wait_for_offboard', 'fly_until_tag'):
             res.success, res.message = False, f'unknown command {cmd}'
             return res
         if cmd == 'wait_for_offboard':
@@ -450,7 +456,7 @@ class TagNav(Node):
         if not ok:
             res.success, res.message = False, why
             return res
-        if tag_id < 0 and cmd == 'center_on_tag':
+        if tag_id < 0 and cmd in ('center_on_tag', 'hold_on_tag'):
             # "any": take whichever tag the detector reports right now
             with self.lock:
                 fresh = time.time() - self.detected_ms < 1.0
@@ -459,9 +465,14 @@ class TagNav(Node):
                 res.success, res.message = False, 'no tag in view to center on'
                 return res
             tag_id = ids[0]
-            self.get_logger().info(f'center_on_tag any -> tag {tag_id}')
+            self.get_logger().info(f'{cmd} any -> tag {tag_id}')
         if cmd == 'fly_until_tag' and req.timeout <= 0:
             timeout = 20.0
+        # hold_on_tag: timeout carries the hold time. The job gets room past it so the
+        # hold, not the job timeout, decides when it ends.
+        hold_s = (req.timeout if req.timeout > 0 else 1.0) if cmd == 'hold_on_tag' else 0.0
+        if cmd == 'hold_on_tag':
+            timeout = hold_s + self.loss_timeout + 5.0
         with self.lock:
             ids_at_start = set(self.detected_ids) if time.time() - self.detected_ms < 1.0 else set()
         job = {
@@ -474,9 +485,12 @@ class TagNav(Node):
             'last_ned_hist': deque(maxlen=3), 'last_ned': None, 'hold_alt': None,
             'offset': None, 'hits': 0, 'log_t': 0.0,
             'mode': 'chase', 'hold_t0': None, 'target': None, 'target_d': None, 'yaw0': None,
+            'hold_s': hold_s,
         }
         if cmd == 'fly_until_tag':
             self.get_logger().info(f'fly_until_tag {tag_id if tag_id >= 0 else "any"}: body vel ({req.north:+.2f}, {req.east:+.2f}, {req.down:+.2f}) m/s, timeout {timeout:.0f} s, ignoring {sorted(ids_at_start)} at start')
+        elif cmd == 'hold_on_tag':
+            self.get_logger().info(f'hold_on_tag {tag_id} for {hold_s:.1f} s')
         else:
             self.get_logger().info(f'{cmd} tag {tag_id}, timeout {timeout:.0f} s')
         self.job = job
@@ -490,11 +504,23 @@ class TagNav(Node):
         self.get_logger().info(f'{cmd} tag {tag_id}: {"ok" if res.success else "FAILED"} ({res.message}) in {res.execution_time:.1f} s')
         return res
 
+    def _height_above_arming(self):
+        """EKF height above the point where the aircraft armed (call under self.lock).
+
+        Without a valid rangefinder the EKF height rides on the barometer, whose zero drifts:
+        after a few landings the ground can sit a metre below the EKF origin. Measuring from
+        the arming point keeps the airborne check honest either way.
+        """
+        if not self.pos:
+            return 0.0
+        ref = self.arm_z if self.arm_z is not None else 0.0
+        return ref - self.pos[2]
+
     def _preflight(self, quiet=False):
         with self.lock:
             fresh = time.time() - self.pos_time < 1.0
             rng_ok = self.dist_bottom_valid and (self.dist_bottom or 0.0) > self.min_airborne_alt
-            ekf_alt = -self.pos[2] if self.pos else 0.0
+            ekf_alt = self._height_above_arming()
             ekf_ok = self.armed and ekf_alt > self.min_airborne_alt
             airborne = rng_ok or ekf_ok
             offboard = self.nav_state == NAV_STATE_OFFBOARD
@@ -575,6 +601,10 @@ class TagNav(Node):
             if job['loss_start'] is None:
                 job['loss_start'] = now
             lost_for = now - job['loss_start']
+            if job['command'] == 'hold_on_tag' and now - job['t0'] >= job['hold_s'] and lost_for <= self.loss_grace:
+                # Hold time is up and the tag only just dropped out: that is still a hold.
+                return self._finish(job, True, f'held over tag {job["tag_id"]} for {job["hold_s"]:.1f} s',
+                                    keep_hold=(job['mode'] == 'hold'))
             if lost_for > self.loss_grace:
                 job['settled_since'] = None
             if lost_for > self.loss_timeout:
@@ -630,15 +660,20 @@ class TagNav(Node):
             job['target'] = None
             self.get_logger().warn(f'tag {job["tag_id"]} drifted to {raw_mag:.2f} m, back to the chase')
 
-        # Settle / accept
-        if raw_mag < self.gate:
+        # hold_on_tag ends on time, not on settling
+        if job['command'] == 'hold_on_tag':
+            if now - job['t0'] >= job['hold_s']:
+                return self._finish(job, True, f'held over tag {job["tag_id"]} for {job["hold_s"]:.1f} s: {raw_mag * 100:.0f} cm',
+                                    keep_hold=(job['mode'] == 'hold'))
+        # Settle / accept (center_on_tag)
+        elif raw_mag < self.gate:
             if job['settled_since'] is None:
                 job['settled_since'] = now
             if now - job['settled_since'] >= self.settle:
                 return self._finish(job, True, f'centered on tag {job["tag_id"]}: {raw_mag * 100:.0f} cm', keep_hold=(job['mode'] == 'hold'))
         else:
             job['settled_since'] = None
-        if job['mode'] == 'hold' and now - job['hold_t0'] >= self.hold_accept_s and raw_mag < self.hold_enter:
+        if job['command'] == 'center_on_tag' and job['mode'] == 'hold' and now - job['hold_t0'] >= self.hold_accept_s and raw_mag < self.hold_enter:
             return self._finish(job, True, f'holding on tag {job["tag_id"]}: {raw_mag * 100:.0f} cm', keep_hold=True)
 
         if job['mode'] == 'hold':
