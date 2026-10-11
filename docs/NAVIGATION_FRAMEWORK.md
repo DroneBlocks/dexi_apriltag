@@ -108,7 +108,7 @@ profile is on. Every block behaves the same in the corridor sim and on the aircr
 ## Gaps, in order
 
 1. One tag-map YAML for `apriltag_odometry` and `tag_nav` (`config/tag_map_avr2026_*.yaml`; odometry still reads `tag_map_ids/x/y` params, to be loaded from it).
-2. Mount offset in one place. `tag_nav` applies it node-side, because the bringup's `base_link -> camera` transform is pitch-only and not a true optical-to-body rotation, so a body-forward translation written into it lands on the wrong axis. The right fix is a correct FRD transform in bringup, after which every consumer (`apriltag_odometry`, `tag_hop`, `precision_landing`, `tag_nav`) gets the mount for free and the node-side offsets go to zero. That is a frame change for all of them, so it gets its own retest.
+2. Mount offset in one place. `tag_nav` applies it node-side, because the bringup's `base_link -> camera` transform is pitch-only and not a true optical-to-body rotation, so a body-forward translation written into it lands on the wrong axis. The right fix is a correct FRD transform in bringup, after which every consumer (`apriltag_odometry`, `precision_landing`, `tag_nav`) gets the mount for free and the node-side offsets go to zero. That is a frame change for all of them, so it gets its own retest.
 3. `land_on_tag`, then `go_to_tag` in `tag_nav`.
 4. Profile switch in the GCS.
 5. Yaw to the tag during the hold (tag yaw from the camera-to-tag rotation, slewed, locked inside 0.4 m).
