@@ -246,7 +246,10 @@ class TagNav(Node):
 
         # Active job, driven by the control timer
         self.job = None
-        self.create_timer(1.0 / self.loop_hz, self._control_tick, callback_group=self.cb)
+        # The control loop only has work while a command runs, so it sleeps between
+        # commands; at 20 Hz an idle timer is a fifth of this node's idle CPU on a CM4.
+        self.control_timer = self.create_timer(1.0 / self.loop_hz, self._control_tick, callback_group=self.cb)
+        self.control_timer.cancel()
         self.create_timer(0.2, self._publish_status, callback_group=self.cb)
         self.last_cmd_time = 0.0
         self.last_goto_time = 0.0
@@ -517,7 +520,11 @@ class TagNav(Node):
         else:
             self.get_logger().info(f'{cmd} tag {tag_id}, timeout {timeout:.0f} s')
         self.job = job
-        job['done'].wait(timeout + 1.0)
+        self.control_timer.reset()
+        try:
+            job['done'].wait(timeout + 1.0)
+        finally:
+            self.control_timer.cancel()
         if not job['done'].is_set():
             job['success'], job['message'] = False, 'timed out'
             self.send_stop()
