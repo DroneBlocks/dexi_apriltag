@@ -9,9 +9,9 @@ This folder contains 20 AprilTag 36h11 PNGs (IDs 0-19) for printing.
 ## Printing
 
 - Print each tag on a standard **8.5×11 inch** sheet of paper
-- The PNGs are pre-sized to **360×360 pixels at 72 DPI = 5 inches total**
-- At that size the **black area is 4 inches (10cm)** with a 0.5-inch white margin on each side
-- Just print at **100% scale** (no fit-to-page) — the tag will be centered with the correct margins
+- The PNGs are **2250×2250 pixels at 300 DPI = 7.5 inches total**
+- At that size the **black square is 6 inches (15.24 cm)**, the AVR 2026 field tag, with a 0.75-inch white margin on each side
+- Print at **100% scale** (no fit-to-page), then measure the black square with a ruler: it must be 6 inches
 - Use **matte paper** (not glossy — glare interferes with detection)
 - Standard black and white laser or inkjet printing works fine
 - Do **not** laminate (causes reflections)
@@ -105,7 +105,7 @@ The tag size in the hardware bringup launch files is already set to match:
 
 ```python
 # In dexi_bringup_pi5.launch.py (or dexi_bringup_ark_cm4.launch.py):
-'size': 0.1,  # Must match physical tag size (4 inches = 0.10m)
+'size': 0.1524,  # 6 in black square
 ```
 
 ## Testing Before Flight

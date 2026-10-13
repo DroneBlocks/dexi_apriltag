@@ -76,7 +76,7 @@ The drone will take off, wait for tag lock, then step through 10 centerline wayp
 Defined in `config/tag_map_sim.yaml`. 2x10 grid of tag36h11 tags:
 - 2 columns at East = -0.25m and +0.25m
 - 10 rows from North = 0m to 9m (1m spacing)
-- Tag size: 0.15m in Unity, 0.10m on real hardware
+- Tag size: 0.15m in Unity, 0.1524m (6 in) on real hardware
 
 ## Real Hardware Setup (ARK CM4)
 
@@ -86,7 +86,7 @@ Defined in `config/tag_map_sim.yaml`. 2x10 grid of tag36h11 tags:
 - Raspberry Pi CM4 companion computer
 - Downward-facing CSI camera (IMX219)
 - Optical flow + range sensor
-- Printed AprilTag 36h11 tags (4-inch / 0.10m)
+- Printed AprilTag 36h11 tags (6-inch / 0.1524m black square)
 
 ### Step 1: PX4 parameters (one-time via QGroundControl)
 
@@ -331,7 +331,7 @@ stream for this; the 2 Hz YOLO stream is too slow to servo on.
 
 ## Printing tags
 
-Tag PNGs are in `tags/` (tags 0-19, tag36h11 family, 360x360px at 72 DPI for 4-inch print). Print at exactly 4 inches (0.10m) — tag size must match the `size` parameter in `apriltag_ros`.
+Tag PNGs are in `tags/` (tags 0-19, tag36h11 family, 2250x2250px at 300 DPI). Print at 100%: the black square is 6 inches (0.1524m), which must match the `size` parameter in `apriltag_ros`.
 
 ## Dependencies
 
