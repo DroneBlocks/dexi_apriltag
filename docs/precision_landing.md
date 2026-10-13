@@ -64,7 +64,7 @@ These need to be set on the FC for indoor flow + tag flight (set them via
   flicker too often at hover altitudes above ~1 m.
 - Tape flat to the floor, no glare, no curling.
 - The tag size in the apriltag launch must match the print (default
-  `'size': 0.15` in `dexi_bringup_*.launch.py`).
+  `'size': 0.1524` in `dexi_bringup_*.launch.py`, the 6 in tags in `tags/`).
 
 ### Running the script
 
