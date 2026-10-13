@@ -37,8 +37,9 @@ tag_nav:
     # Hand-off from RC: aux channel index (1..6, 0 = none); aux2 is RC channel 9.
     engage_aux_index: 0
     engage_aux_threshold: 0.5
-    # true: entering Offboard (RC_MAP_OFFB_SW) counts as engage.
-    engage_on_offboard: false
+    # true: entering Offboard counts as engage. The sim has no RC switch, so choosing
+    # Offboard in the DroneBlocks mode menu is the hand-off, as on the DEXI-5 config.
+    engage_on_offboard: true
     transit_min_s: 0.5
     transit_confirm: 2
     loop_hz: 20.0
