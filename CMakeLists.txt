@@ -74,6 +74,7 @@ install(PROGRAMS
   scripts/precision_landing.py
   scripts/corridor_navigation.py
   scripts/tag_nav.py
+  scripts/tag_ev_odometry.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
