@@ -21,6 +21,24 @@ frame without changing frames.
 Variance grows with range and shrinks with the number of tags; PX4 uses
 max(EKF2_EVP_NOISE^2, reported) when EKF2_EV_NOISE_MD = 0.
 
+GPS-frame anchor (anchor_enable): the surveyed map and the GPS frame differ by the GPS error
+(meters). While GNSS is fused PX4 hides that in its EV position bias estimator, then resets
+the EKF onto the raw EV fix when GNSS stops: a jump of the full GPS error. With the anchor,
+while GNSS is fused and an anchor tag (the X tag, and the apron/threshold tags) is seen with
+the aircraft slow, this node
+measures offset = EKF local xy - raw tag xy (median over anchor_window_s, then followed at up
+to anchor_max_rate so GPS wander moves EV smoothly) and publishes every fix as raw + offset, so
+EV agrees with the GPS frame and the reset at GNSS loss is only the drift of the stale-GPS
+seconds. With anchor_apply_at_freeze (default) the offset is only measured while GNSS is fused
+(raw fixes go out, so PX4's EV bias estimator keeps the EKF locally tag-stable as before) and
+applied at the freeze; otherwise it is applied once measured and then follows the GPS. Either
+way the switch bumps reset_counter, so PX4 re-seeds its bias estimator (to ~0) instead of
+walking it over. The offset follows EKF xy resets while GNSS is fused and is frozen for good
+once GNSS fusion stops or the GPS feed goes stale; it is never estimated indoors. No anchor by then = raw fixes, as without the anchor. Only xy: heading is
+already the tag's (EV yaw is fused over the X), and EV height is fused against the baro height
+reference through PX4's own EV height bias estimator. The price: indoor absolute (lat/lon)
+position inherits the GPS error at the anchor; tag-relative flying does not care.
+
     ros2 run dexi_apriltag tag_ev_odometry.py --ros-args --params-file config/tag_ev_handover.yaml
 """
 
@@ -38,7 +56,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from apriltag_msgs.msg import AprilTagDetectionArray
 from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import String
-from px4_msgs.msg import VehicleOdometry, VehicleAttitude, VehicleLocalPosition
+from px4_msgs.msg import VehicleOdometry, VehicleAttitude, VehicleLocalPosition, EstimatorStatusFlags, SensorGps
 
 
 def quat_to_rot(w, x, y, z):
@@ -126,6 +144,22 @@ class TagEvOdometry(Node):
         p('sigma_yaw_deg_base', 2.0); p('sigma_yaw_deg_per_m', 1.0)
         p('publish_yaw', True)
         p('stamp_offset_ms', 0.0)         # added to the image stamp (negative = older)
+        # GPS-frame anchor (see the module docstring)
+        p('anchor_enable', False)
+        p('anchor_tag_ids', [0])
+        p('anchor_min_s', 2.0)            # s of steady anchor-tag samples before the first offset
+        p('anchor_window_s', 5.0)         # s, rolling median window while GNSS is fused
+        p('anchor_min_samples', 15)
+        p('anchor_max_speed', 0.15)       # m/s EKF horizontal speed for a sample
+        p('anchor_max_spread', 0.15)      # m, 90th percentile distance of samples from the median
+        p('anchor_gps_stale_s', 1.0)      # no vehicle_gps_position for this long = GPS gone
+        # After the first offset it follows the window median at most this fast (m/s), so GPS
+        # wander moves EV smoothly instead of in steps; 0 = keep the first offset (no tracking).
+        p('anchor_max_rate', 0.03)
+        # true: keep publishing raw fixes while GNSS is fused (PX4's EV bias estimator keeps the
+        # EKF locally tag-stable, as without the anchor) and only measure the offset; apply it,
+        # with a reset_counter bump, at the freeze. false: apply it as soon as it is measured.
+        p('anchor_apply_at_freeze', True)
         p('dry_run', False)
         p('csv_path', '/home/ubuntu/logs/tag_ev.csv')
 
@@ -163,6 +197,18 @@ class TagEvOdometry(Node):
         self.dry_run = bool(g('dry_run'))
         self.publish_yaw = bool(g('publish_yaw'))
         self.stamp_offset_us = int(float(g('stamp_offset_ms')) * 1000)
+        self.anchor_on = bool(g('anchor_enable'))
+        self.apply_at_freeze = bool(g('anchor_apply_at_freeze'))
+        self.anchor_ids = {int(i) for i in g('anchor_tag_ids')}
+        self.anchor_state = 'waiting' if self.anchor_on else 'off'   # waiting -> set -> frozen | none
+        self.anchor_off = None
+        self.anchor_t = 0.0
+        self.anchor_samples = []          # (wall s, dn, de)
+        self.reset_counter = 0
+        self.gnss = None; self.gnss_seen = False
+        self.gps_t = None; self.gps_fix = 0
+        self.lpos_hist = []               # (receive us, x, y, vx, vy, xy_valid)
+        self.xy_rc = None
 
         px4_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -172,6 +218,9 @@ class TagEvOdometry(Node):
         self.create_subscription(CameraInfo, '/cam0/camera_info', self.on_info, qos_profile_sensor_data)
         self.create_subscription(VehicleAttitude, '/fmu/out/vehicle_attitude', self.on_att, qos_profile_sensor_data)
         self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.on_lpos, qos_profile_sensor_data)
+        if self.anchor_on:
+            self.create_subscription(EstimatorStatusFlags, '/fmu/out/estimator_status_flags', self.on_flags, qos_profile_sensor_data)
+            self.create_subscription(SensorGps, '/fmu/out/vehicle_gps_position', self.on_gps, qos_profile_sensor_data)
 
         path = g('csv_path')
         self.csv = None
@@ -182,7 +231,7 @@ class TagEvOdometry(Node):
             if self.csv_f.tell() == 0:
                 self.csv.writerow(['wall_us', 'stamp_us', 'px4_stamp_us', 'latency_ms', 'n_tags', 'ids', 'north', 'east', 'down',
                                    'yaw_deg', 'sigma_xy', 'sigma_z', 'range_m', 'ekf_n', 'ekf_e', 'ekf_d', 'ekf_yaw_deg',
-                                   'published'])
+                                   'published', 'raw_north', 'raw_east', 'off_n', 'off_e', 'anchor', 'applied'])
         self.count = 0
         self._last_count = 0
         self.drops = {}
@@ -191,7 +240,9 @@ class TagEvOdometry(Node):
         self.map_shift = None if math.isfinite(self.origin[0]) else np.zeros(3)
         self.ref_stamp = None
         self.get_logger().info(f'tag EV: {len(self.map)} tags in map, dry_run={self.dry_run}, '
-                               f'publish_yaw={self.publish_yaw}, stamp_offset={self.stamp_offset_us / 1000:.0f} ms')
+                               f'anchor apply {"at freeze" if self.apply_at_freeze else "when measured"}, '
+                               f'publish_yaw={self.publish_yaw}, stamp_offset={self.stamp_offset_us / 1000:.0f} ms, '
+                               f'anchor={"on, tags " + str(sorted(self.anchor_ids)) if self.anchor_on else "off"}')
 
     def on_info(self, msg):
         if self.K is None:
@@ -211,16 +262,106 @@ class TagEvOdometry(Node):
 
     def on_lpos(self, msg):
         self.lpos = msg
+        self.lpos_hist.append((int(time.time() * 1e6), msg.x, msg.y, msg.vx, msg.vy, bool(msg.xy_valid)))
+        if len(self.lpos_hist) > 400:
+            del self.lpos_hist[:100]
+        if self.xy_rc is not None and msg.xy_reset_counter != self.xy_rc:
+            # the EKF frame moved: old samples are in the old frame; a live offset moves with it
+            self.anchor_samples.clear()
+            if self.anchor_state == 'set':
+                self.anchor_off = self.anchor_off + np.array([msg.delta_xy[0], msg.delta_xy[1]])
+                self.get_logger().info(f'anchor: EKF xy reset {msg.delta_xy[0]:+.3f} {msg.delta_xy[1]:+.3f}, '
+                                       f'offset now N {self.anchor_off[0]:+.3f} E {self.anchor_off[1]:+.3f}')
+        self.xy_rc = msg.xy_reset_counter
         if not math.isfinite(self.origin[0]) or not msg.xy_global:
             return
         if self.ref_stamp == msg.ref_timestamp:
             return
         self.ref_stamp = msg.ref_timestamp
+        self.anchor_samples.clear()   # the offset itself does not depend on the origin
         n, e = project(self.origin[0], self.origin[1], msg.ref_lat, msg.ref_lon)
         d = -(self.origin[2] - msg.ref_alt) if (math.isfinite(self.origin[2]) and msg.z_global) else 0.0
         self.map_shift = np.array([n, e, d])
         self.get_logger().info(f'EKF origin {msg.ref_lat:.7f}, {msg.ref_lon:.7f}, {msg.ref_alt:.2f}: '
                                f'map origin at N {n:.3f} E {e:.3f} D {d:.3f} in the EKF frame')
+
+    def on_flags(self, msg):
+        self.gnss = bool(msg.cs_gnss_pos)
+        self.gnss_seen = self.gnss_seen or self.gnss
+        self.anchor_freeze_check()
+
+    def on_gps(self, msg):
+        self.gps_t = time.time(); self.gps_fix = int(msg.fix_type)
+
+    def gps_fresh(self):
+        # never received (no such topic on this bridge): judge by the EKF flag alone
+        return self.gps_t is None or (time.time() - self.gps_t < self.get_parameter('anchor_gps_stale_s').value
+                                      and self.gps_fix >= 3)
+
+    def anchor_freeze_check(self):
+        if self.anchor_state not in ('waiting', 'set') or not self.gnss_seen:
+            return
+        gone = self.gnss is False or not self.gps_fresh()
+        if self.anchor_state == 'set' and gone:
+            self.anchor_state = 'frozen'
+            if self.apply_at_freeze:
+                self.reset_counter = (self.reset_counter + 1) % 256
+            self.get_logger().info(f'anchor FROZEN at N {self.anchor_off[0]:+.3f} E {self.anchor_off[1]:+.3f} '
+                                   f'(gnss_pos {int(bool(self.gnss))}, gps fresh {int(self.gps_fresh())})')
+        elif self.anchor_state == 'waiting' and self.gnss is False:
+            self.anchor_state = 'none'
+            self.get_logger().warn('anchor: GNSS fusion stopped before an anchor was measured, raw tag fixes from here')
+
+    def anchor_sample(self, fixes, stamp_us):
+        """One EKF - raw sample from the anchor tags in this image, then the rolling offset."""
+        g = lambda n: self.get_parameter(n).value
+        self.anchor_freeze_check()
+        if self.anchor_state not in ('waiting', 'set') or not self.gnss or not self.gps_fresh():
+            return
+        af = [f for f in fixes if f[0] in self.anchor_ids]
+        lp = self.lpos_at(stamp_us)
+        now = time.time()
+        if af and lp is not None and lp[5] and math.hypot(lp[3], lp[4]) < g('anchor_max_speed'):
+            w = np.array([1 / f[3] ** 2 for f in af])
+            raw = sum(wi * f[1][:2] for wi, f in zip(w, af)) / w.sum()
+            self.anchor_samples.append((now, lp[1] - raw[0], lp[2] - raw[1]))
+        self.anchor_samples = [a for a in self.anchor_samples if now - a[0] <= g('anchor_window_s')]
+        S = self.anchor_samples
+        if len(S) < g('anchor_min_samples') or S[-1][0] - S[0][0] < g('anchor_min_s'):
+            return
+        d = np.array([[a[1], a[2]] for a in S])
+        med = np.median(d, axis=0)
+        spread = float(np.percentile(np.hypot(*(d - med).T), 90))
+        if spread > g('anchor_max_spread'):
+            return
+        first = self.anchor_state == 'waiting'
+        rate = float(g('anchor_max_rate'))
+        if first or self.apply_at_freeze:
+            self.anchor_off = med      # not published yet: no need to move it smoothly
+        elif rate > 0:
+            step = med - self.anchor_off
+            lim = rate * max(0.0, now - self.anchor_t)
+            n = float(np.hypot(*step))
+            self.anchor_off = self.anchor_off + (step if n <= lim else step * (lim / n))
+        self.anchor_t = now
+        self.anchor_state = 'set'
+        if first and not self.apply_at_freeze:
+            # new EV frame: PX4 re-seeds its EV position bias (~0) instead of walking it over
+            self.reset_counter = (self.reset_counter + 1) % 256
+            self.get_logger().info(f'anchor SET N {med[0]:+.3f} E {med[1]:+.3f} ({len(S)} samples over '
+                                   f'{S[-1][0] - S[0][0]:.1f} s, spread {spread:.3f} m), reset_counter {self.reset_counter}')
+
+    def anchor_applied(self):
+        return self.anchor_state == 'frozen' or (self.anchor_state == 'set' and not self.apply_at_freeze)
+
+    def lpos_at(self, t_us):
+        if not self.lpos_hist:
+            return None
+        ts = [a[0] for a in self.lpos_hist]
+        i = bisect.bisect_left(ts, t_us)
+        cand = [j for j in (i - 1, i) if 0 <= j < len(ts)]
+        j = min(cand, key=lambda k: abs(ts[k] - t_us))
+        return None if abs(ts[j] - t_us) > 100000 else self.lpos_hist[j]
 
     def attitude_at(self, t_us):
         if not self.att:
@@ -238,7 +379,8 @@ class TagEvOdometry(Node):
 
     def report(self):
         if self.drops or self.count != self._last_count:
-            self.get_logger().info(f'fixes {self.count - self._last_count} in 10 s, drops {self.drops}')
+            self.get_logger().info(f'fixes {self.count - self._last_count} in 10 s, drops {self.drops}, anchor {self.anchor_state}'
+                                   + (f' N {self.anchor_off[0]:+.3f} E {self.anchor_off[1]:+.3f}' if self.anchor_off is not None else ''))
         self._last_count = self.count
         self.drops = {}
 
@@ -299,6 +441,12 @@ class TagEvOdometry(Node):
         y0 = fixes[0][2]
         yaw = wrap(y0 + sum(w * wrap(f[2] - y0) for w, f in zip(wy, fixes)) / wy.sum())
         var_xy, var_z, var_yaw = 1 / wxy.sum(), 1 / wz.sum(), 1 / wy.sum()
+        raw_xy = pos[:2].copy()
+        if self.anchor_on:
+            self.anchor_sample(fixes, stamp_us)
+            if self.anchor_applied():
+                pos[:2] += self.anchor_off
+        off = self.anchor_off if self.anchor_state in ('set', 'frozen') else np.zeros(2)
 
         out = VehicleOdometry()
         now_us = int(time.time() * 1e6)
@@ -319,7 +467,7 @@ class TagEvOdometry(Node):
         out.angular_velocity = [nan, nan, nan]
         out.position_variance = [float(var_xy), float(var_xy), float(var_z)]
         out.velocity_variance = [nan, nan, nan]
-        out.reset_counter = 0
+        out.reset_counter = self.reset_counter
         out.quality = 100
         if not self.dry_run:
             self.pub.publish(out)
@@ -332,13 +480,16 @@ class TagEvOdometry(Node):
                                f'{pos[0]:.4f}', f'{pos[1]:.4f}', f'{pos[2]:.4f}', f'{math.degrees(yaw):.2f}',
                                f'{math.sqrt(var_xy):.4f}', f'{math.sqrt(var_z):.4f}', f'{rng:.3f}',
                                f'{lp.x:.4f}' if lp else '', f'{lp.y:.4f}' if lp else '', f'{lp.z:.4f}' if lp else '',
-                               f'{math.degrees(lp.heading):.2f}' if lp else '', int(not self.dry_run)])
+                               f'{math.degrees(lp.heading):.2f}' if lp else '', int(not self.dry_run),
+                               f'{raw_xy[0]:.4f}', f'{raw_xy[1]:.4f}', f'{off[0]:.4f}', f'{off[1]:.4f}', self.anchor_state,
+                               int(self.anchor_on and self.anchor_applied())])
             if self.count % 20 == 0:
                 self.csv_f.flush()
         s = String()
         s.data = (f'{{"ids":[{ids.replace(" ", ",")}],"n":{pos[0]:.3f},"e":{pos[1]:.3f},"d":{pos[2]:.3f},'
                   f'"yaw_deg":{math.degrees(yaw):.2f},"sigma_xy":{math.sqrt(var_xy):.3f},"stamp_us":{stamp_us},'
-                  f'"latency_ms":{(now_us - stamp_us) / 1000:.1f}}}')
+                  f'"latency_ms":{(now_us - stamp_us) / 1000:.1f},"anchor":"{self.anchor_state}",'
+                  f'"off_n":{off[0]:.3f},"off_e":{off[1]:.3f}}}')
         self.dbg.publish(s)
         if self.count % 50 == 1:
             self.get_logger().info(f'tags [{ids}] N {pos[0]:.2f} E {pos[1]:.2f} D {pos[2]:.2f} yaw {math.degrees(yaw):.1f} '

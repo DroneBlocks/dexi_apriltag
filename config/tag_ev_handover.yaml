@@ -1,19 +1,20 @@
 # Floor tag map for the Warehouse Handover site (droneblocks-web-sim courses/handover.json,
 # generated from sites/fitzhugh.json). north/east meters from the map origin (the spawn),
 # down = -height above the ground there. tag36h11; tag 0 = 0.75 m on the X center (outside),
-# 1-6 = 6 in (0.1524 m) floor tags inside. Sizes are the black edge.
+# 1-6 = 6 in (0.1524 m) floor tags inside, 7 (door threshold) and 8 (apron) = 6 in aiding
+# tags that close the X tag -> tag 1 stretch. Sizes are the black edge.
 tag_ev_odometry:
   ros__parameters:
     map_origin_lat: 30.234022
     map_origin_lon: -98.006028
     map_origin_alt: 325.0   # ground AMSL at the spawn (PX4_HOME_ALT in SITL)
     tag_size: 0.1524
-    tag_ids: [0, 1, 2, 3, 4, 5, 6]
-    tag_sizes: [0.75, 0.1524, 0.1524, 0.1524, 0.1524, 0.1524, 0.1524]
-    tag_north: [24.2555, 26.18, 27.15, 28.11, 29.08, 30.04, 31.01]
-    tag_east: [29.3009, 27.0, 25.85, 24.7, 23.55, 22.41, 21.26]
-    tag_down: [-0.027, -0.02, -0.02, -0.02, -0.02, -0.02, -0.02]
-    tag_top_bearing_deg: [310.0, 310.0, 310.0, 310.0, 310.0, 310.0, 310.0]
+    tag_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    tag_sizes: [0.75, 0.1524, 0.1524, 0.1524, 0.1524, 0.1524, 0.1524, 0.1524, 0.1524]
+    tag_north: [24.2555, 26.18, 27.15, 28.11, 29.08, 30.04, 31.01, 25.5127, 24.789]
+    tag_east: [29.3009, 27.0, 25.85, 24.7, 23.55, 22.41, 21.26, 27.8027, 28.6651]
+    tag_down: [-0.027, -0.02, -0.02, -0.02, -0.02, -0.02, -0.02, -0.02, -0.02]
+    tag_top_bearing_deg: [310.0, 310.0, 310.0, 310.0, 310.0, 310.0, 310.0, 310.0, 310.0]
     # DEXI-5 downward camera: lens 105 mm ahead of the body center; 80 mm below it in the sim
     camera_forward_offset: 0.105
     camera_right_offset: 0.0
@@ -30,5 +31,20 @@ tag_ev_odometry:
     sigma_yaw_deg_per_m: 1.0
     publish_yaw: true
     stamp_offset_ms: 0.0
+    # GPS-frame anchor: while GNSS is fused and the X tag (0) or the apron/threshold tags (8, 7)
+    # are seen with the aircraft slow, offset = EKF local xy - raw tag xy (median over the
+    # window). Frozen when GNSS fusion stops (or the GPS feed goes stale), and from then on every
+    # EV fix is raw + offset, so EV agrees with the GPS frame and the EKF does not jump when GNSS
+    # drops. Never estimated indoors.
+    anchor_enable: true
+    anchor_apply_at_freeze: true   # false: apply once measured, then follow GPS (EKF less tag-stable outdoors)
+    anchor_tag_ids: [0, 7, 8]
+    anchor_min_s: 2.0
+    anchor_window_s: 5.0
+    anchor_min_samples: 15
+    anchor_max_speed: 0.35
+    anchor_max_spread: 0.15
+    anchor_gps_stale_s: 1.0
+    anchor_max_rate: 0.03   # m/s the offset may follow GPS wander after the first estimate
     dry_run: false
     csv_path: /home/ubuntu/logs/tag_ev.csv
