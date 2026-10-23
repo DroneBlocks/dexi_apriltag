@@ -1,23 +1,25 @@
 # Floor tag map for the Warehouse Handover site (droneblocks-web-sim courses/handover.json,
 # generated from sites/fitzhugh.json). north/east meters from the map origin (the spawn),
-# down = -height above the ground there. tag36h11, 6 in (0.1524 m) black edge.
+# down = -height above the ground there. tag36h11; tag 0 = 0.75 m on the X center (outside),
+# 1-6 = 6 in (0.1524 m) floor tags inside. Sizes are the black edge.
 tag_ev_odometry:
   ros__parameters:
     map_origin_lat: 30.234022
     map_origin_lon: -98.006028
     map_origin_alt: 325.0   # ground AMSL at the spawn (PX4_HOME_ALT in SITL)
     tag_size: 0.1524
-    tag_ids: [1, 2, 3, 4, 5, 6]
-    tag_north: [26.18, 27.15, 28.11, 29.08, 30.04, 31.01]
-    tag_east: [27.0, 25.85, 24.7, 23.55, 22.41, 21.26]
-    tag_down: [-0.02, -0.02, -0.02, -0.02, -0.02, -0.02]
-    tag_top_bearing_deg: [310.0, 310.0, 310.0, 310.0, 310.0, 310.0]
+    tag_ids: [0, 1, 2, 3, 4, 5, 6]
+    tag_sizes: [0.75, 0.1524, 0.1524, 0.1524, 0.1524, 0.1524, 0.1524]
+    tag_north: [24.2555, 26.18, 27.15, 28.11, 29.08, 30.04, 31.01]
+    tag_east: [29.3009, 27.0, 25.85, 24.7, 23.55, 22.41, 21.26]
+    tag_down: [-0.027, -0.02, -0.02, -0.02, -0.02, -0.02, -0.02]
+    tag_top_bearing_deg: [310.0, 310.0, 310.0, 310.0, 310.0, 310.0, 310.0]
     # DEXI-5 downward camera: lens 105 mm ahead of the body center; 80 mm below it in the sim
     camera_forward_offset: 0.105
     camera_right_offset: 0.0
     camera_down_offset: 0.08
     tag_yaw_offset_deg: 0.0
-    max_range: 4.0
+    max_range: 4.0          # for a tag_size tag; scaled by size (tag 0: 19.7 m)
     min_decision_margin: 20.0
     max_reproj_px: 2.0
     sigma_xy_base: 0.03

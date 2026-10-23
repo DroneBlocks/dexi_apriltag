@@ -265,6 +265,7 @@ class TagNav(Node):
 
     def _on_local_position(self, m):
         with self.lock:
+            self._follow_ekf_resets(m)
             self.vel_xy = math.hypot(m.vx, m.vy) if hasattr(m, 'vx') else 0.0
             self.pos = (m.x, m.y, m.z)
             self.heading = m.heading
@@ -272,6 +273,38 @@ class TagNav(Node):
             self.dist_bottom = m.dist_bottom
             self.dist_bottom_valid = bool(m.dist_bottom_valid)
             self.pos_time = time.time()
+
+    def _follow_ekf_resets(self, m):
+        """EKF2 resets (GPS lost -> tags, GPS back, a yaw reset) jump the local frame. Every point
+        a job holds (hold target, last sighting) is absolute in that frame, so move it by the
+        same delta; otherwise the next hold_ned sends the aircraft the reset's distance away.
+        Called under self.lock."""
+        last = getattr(self, '_reset_counters', None)
+        now = (m.xy_reset_counter, m.z_reset_counter, m.heading_reset_counter)
+        self._reset_counters = now
+        if last is None or now == last:
+            return
+        job = self.job
+        dn = float(m.delta_xy[0]) if now[0] != last[0] else 0.0
+        de = float(m.delta_xy[1]) if now[0] != last[0] else 0.0
+        dd = float(m.delta_z) if now[1] != last[1] else 0.0
+        dpsi = float(m.delta_heading) if now[2] != last[2] else 0.0
+        if job is not None:
+            if job.get('target') is not None:
+                job['target'] = (job['target'][0] + dn, job['target'][1] + de)
+            if job.get('target_d') is not None:
+                job['target_d'] += dd
+            if job.get('yaw0') is not None:
+                job['yaw0'] = math.degrees(math.remainder(math.radians(job['yaw0']) + dpsi, 2 * math.pi))
+            if job.get('last_ned') is not None:
+                job['last_ned'] = (job['last_ned'][0] + dn, job['last_ned'][1] + de)
+            if job.get('last_ned_hist'):
+                job['last_ned_hist'] = deque(((n + dn, e + de) for n, e in job['last_ned_hist']), maxlen=3)
+            if job.get('ekf_at_sight'):
+                ekf0, down0 = job['ekf_at_sight']
+                job['ekf_at_sight'] = (ekf0 - dd, down0)          # altitude() is -z
+        self.get_logger().warn(f'EKF reset: xy ({dn:+.3f}, {de:+.3f}) m, z {dd:+.3f} m, heading {math.degrees(dpsi):+.2f} deg'
+                               f'{" - job points moved" if job is not None else ""}')
 
     def _on_vehicle_status(self, m):
         with self.lock:

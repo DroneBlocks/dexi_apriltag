@@ -1,0 +1,50 @@
+# tag_nav for the handover SITL (dexi-sim-handover): the three.js Warehouse Handover scene, the
+# camera mounted like the DEXI-5 (105 mm ahead of the body center). Position from the manager's
+# 20 Hz echo; no RC, engage not used (the mission script calls the primitives).
+tag_nav:
+  ros__parameters:
+    camera_forward_offset: 0.105
+    camera_right_offset: 0.0
+    camera_yaw_deg: 0.0
+    tag_scale: 1.0
+    tag_family: tag36h11
+    centering_speed: 0.20
+    centering_taper_dist: 0.30
+    centering_min_speed: 0.0
+    filter_length: 5
+    hold_enter: 0.25
+    hold_exit: 0.40
+    hold_alpha: 0.8
+    # 0 in this SITL: the EKF runs on the tags, so nudging the hold point from the camera only
+    # chases its own latency (tag 6 hold 9 cm mean / 17 cm max with 0.25, 3-6 cm / 7-9 cm with 0).
+    # Keep 0.25 on flow-only aircraft, where it cancels the flow velocity bias.
+    hold_nudge: 0.0
+    hold_nudge_max: 0.012
+    hold_settled_m: 0.35
+    hold_settled_v: 0.12
+    hold_accept_s: 8.0
+    hold_command: hold_ned
+    centering_gate: 0.10
+    centering_settle: 0.7
+    tag_stale_s: 0.5
+    tag_loss_grace: 3.0
+    centering_loss_timeout: 8.0
+    hold_altitude: true
+    alt_kz: 1.0
+    alt_max_rate: 0.3
+    # SITL has GPS, so the rangefinder gate is replaced by EKF height while armed.
+    require_airborne: true
+    min_airborne_alt: 0.30
+    require_offboard: true
+    dry_run: false
+    # Hand-off from RC: aux channel index (1..6, 0 = none); aux2 is RC channel 9.
+    engage_aux_index: 0
+    engage_aux_threshold: 0.5
+    # true: entering Offboard counts as engage. The sim has no RC switch, so choosing
+    # Offboard in the DroneBlocks mode menu is the hand-off, as on the DEXI-5 config.
+    engage_on_offboard: false
+    transit_min_s: 0.5
+    transit_confirm: 2
+    loop_hz: 20.0
+    command_hz: 10.0
+    local_position_topic: /fmu/out/vehicle_local_position_20hz

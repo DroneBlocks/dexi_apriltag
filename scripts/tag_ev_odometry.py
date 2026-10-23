@@ -107,6 +107,9 @@ class TagEvOdometry(Node):
         p = self.declare_parameter
         p('tag_ids', [0]); p('tag_north', [0.0]); p('tag_east', [0.0]); p('tag_down', [0.0])
         p('tag_top_bearing_deg', [0.0]); p('tag_size', 0.1524)
+        # Per-id black-edge sizes, same order as tag_ids ([] = tag_size for every tag). Range gate
+        # and sigmas scale with range / size: a 0.75 m tag at 5 m reads like a 6 in tag at 1 m.
+        p('tag_sizes', [0.0])
         # The map's own origin (tag north/east/down are meters from it, down from its ground).
         # Tags are moved into PX4's local frame with the EKF origin (ref_lat/lon/alt), so a map
         # surveyed in a site frame lines up with GPS. NaN latitude = map already in EKF frame.
@@ -131,6 +134,10 @@ class TagEvOdometry(Node):
         if not (len(ids) == len(tn) == len(te) == len(td) == len(tb)):
             raise RuntimeError('tag map arrays differ in length')
         self.tag_size = float(g('tag_size'))
+        sizes = [float(v) for v in g('tag_sizes') if v > 0]
+        if sizes and len(sizes) != len(ids):
+            raise RuntimeError('tag_sizes must list one size per tag id (or be empty)')
+        self.sizes = {int(i): (sizes[k] if sizes else self.tag_size) for k, i in enumerate(ids)}
         self.map = {}
         for i, n, e, d, b in zip(ids, tn, te, td, tb):
             # Tag frame (apriltag_ros PnP object points): x = print right, y = print down,
@@ -140,11 +147,11 @@ class TagEvOdometry(Node):
             y_axis = np.array([math.cos(top + math.pi), math.sin(top + math.pi), 0.0])
             z_axis = np.cross(x_axis, y_axis)
             self.map[int(i)] = (np.array([n, e, d], dtype=float), np.column_stack([x_axis, y_axis, z_axis]))
-        s = self.tag_size / 2
         # apriltag corner order p0..p3 = tag (-1, 1), (1, 1), (1, -1), (-1, -1), which is also the
         # order SOLVEPNP_IPPE_SQUARE requires. Tag frame: x = print right, y = print down,
         # z = into the tag (so -y is the print's top).
-        self.obj = np.array([[-s, s, 0], [s, s, 0], [s, -s, 0], [-s, -s, 0]], dtype=np.float64)
+        self.obj = {i: np.array([[-s, s, 0], [s, s, 0], [s, -s, 0], [-s, -s, 0]], dtype=np.float64)
+                    for i, s in ((i, sz / 2) for i, sz in self.sizes.items())}
         # camera (x right, y down, z optical) -> body FRD for the downward mount
         self.R_bc = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=float)
         self.t_bc = np.array([g('camera_forward_offset'), g('camera_right_offset'), g('camera_down_offset')])
@@ -258,12 +265,13 @@ class TagEvOdometry(Node):
             if det.decision_margin < g('min_decision_margin'):
                 self.drop('decision margin'); continue
             img = np.array([[c.x, c.y] for c in det.corners], dtype=np.float64)
-            ok, rvec, tvec = cv2.solvePnP(self.obj, img, self.K, self.D, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+            obj = self.obj[det.id]
+            ok, rvec, tvec = cv2.solvePnP(obj, img, self.K, self.D, flags=cv2.SOLVEPNP_IPPE_SQUARE)
             if not ok:
                 continue
-            proj, _ = cv2.projectPoints(self.obj, rvec, tvec, self.K, self.D)
+            proj, _ = cv2.projectPoints(obj, rvec, tvec, self.K, self.D)
             reproj = float(np.max(np.linalg.norm(proj.reshape(-1, 2) - img, axis=1)))
-            rng = float(np.linalg.norm(tvec))
+            rng = float(np.linalg.norm(tvec)) * self.tag_size / self.sizes[det.id]   # in default-size ranges
             if reproj > g('max_reproj_px'):
                 self.drop('reprojection'); continue
             if rng > g('max_range'):
