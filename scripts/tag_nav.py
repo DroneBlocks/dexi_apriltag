@@ -129,6 +129,7 @@ class TagNav(Node):
         p('hold_altitude', True)
         p('alt_kz', 1.0)
         p('alt_max_rate', 0.3)
+        p('hold_route_altitude', True)    # hold one height for the whole engaged route (see _route_target)
         # Safety
         p('require_airborne', True)       # rangefinder must be valid and above min_airborne_alt
         p('min_airborne_alt', 0.30)
@@ -175,6 +176,8 @@ class TagNav(Node):
         self.hold_altitude = g('hold_altitude').value
         self.alt_kz = g('alt_kz').value
         self.alt_max_rate = g('alt_max_rate').value
+        self.hold_route_altitude = g('hold_route_altitude').value
+        self.route_alt = None      # m above the arming point, captured on the first command after engage
         self.require_airborne = g('require_airborne').value
         self.min_airborne_alt = g('min_airborne_alt').value
         self.require_offboard = g('require_offboard').value
@@ -277,10 +280,13 @@ class TagNav(Node):
         with self.lock:
             was_armed = self.armed
             entered_offboard = m.nav_state == NAV_STATE_OFFBOARD and self.nav_state != NAV_STATE_OFFBOARD
+            if self.nav_state == NAV_STATE_OFFBOARD and m.nav_state != NAV_STATE_OFFBOARD:
+                self._clear_route_alt('left OFFBOARD')
             self.nav_state = m.nav_state
             now_armed = m.arming_state == VehicleStatus.ARMING_STATE_ARMED
             if now_armed and not was_armed:
                 self.arm_z = self.pos[2] if self.pos else None
+                self._clear_route_alt('armed')
             ekf_alt = self._height_above_arming()
             airborne = (self.dist_bottom_valid and (self.dist_bottom or 0.0) > self.min_airborne_alt) or (now_armed and ekf_alt > self.min_airborne_alt)
             if entered_offboard and self.engage_on_offboard and not self.engaged and now_armed and airborne:
@@ -288,6 +294,8 @@ class TagNav(Node):
                 self.engage_changed = time.time()
                 self.get_logger().info('engage SET (entered OFFBOARD)')
             self.armed = m.arming_state == VehicleStatus.ARMING_STATE_ARMED
+            if was_armed and not self.armed:
+                self._clear_route_alt('disarmed')
             if was_armed and not self.armed and self.engaged:
                 self.engaged = False
                 self.engage_changed = time.time()
@@ -297,6 +305,7 @@ class TagNav(Node):
         with self.lock:
             if bool(m.data) != self.engaged:
                 self.engaged = bool(m.data)
+                self._clear_route_alt('engage SET' if self.engaged else 'engage CLEARED')
                 self.engage_changed = time.time()
                 self.get_logger().info(f'engage {"SET" if self.engaged else "CLEARED"} (topic)')
 
@@ -407,6 +416,12 @@ class TagNav(Node):
         fused it is baro, which can read 0.4 m low.)"""
         if not self.hold_altitude:
             return 0.0
+        rt = self._route_target()
+        if rt is not None:                                 # hold the route height, not this command's
+            target, h = rt
+            job['hold_alt'] = target
+            err = h - target                               # positive = too high
+            return max(-self.alt_max_rate, min(self.alt_max_rate, self.alt_kz * err))   # NED: down positive
         ekf = self.altitude()
         if tag_down is not None:
             if job['hold_alt'] is None:
@@ -533,6 +548,31 @@ class TagNav(Node):
         res.execution_time = time.time() - t0
         self.get_logger().info(f'{cmd} tag {tag_id}: {"ok" if res.success else "FAILED"} ({res.message}) in {res.execution_time:.1f} s')
         return res
+
+    def _clear_route_alt(self, why):
+        """Forget the route height (call under self.lock) so the next run captures its own."""
+        if self.route_alt is not None:
+            self.get_logger().info(f'route height {self.route_alt:.2f} m cleared: {why}')
+        self.route_alt = None
+
+    def _route_target(self):
+        """(route height, current height), both m above the arming point, or None when not in use.
+
+        Captured once, on the first command after engage, so a small vertical-speed bias in PX4 shows up as a
+        constant few-cm offset instead of ratcheting the height up with every command.
+        """
+        if not self.hold_route_altitude:
+            return None
+        with self.lock:
+            if self.arm_z is None or not self.pos:
+                return None
+            h = self.arm_z - self.pos[2]
+            if not math.isfinite(h):
+                return None
+            if self.route_alt is None:
+                self.route_alt = h
+                self.get_logger().info(f'route height captured: {h:.2f} m above the arming point')
+            return self.route_alt, h
 
     def _height_above_arming(self):
         """EKF height above the point where the aircraft armed (call under self.lock).
@@ -711,9 +751,14 @@ class TagNav(Node):
             if job['new_sample'] or job['target'] is None:
                 tn, te = self.body_to_ned(fwd, right)
                 new_n, new_e = self.pos[0] + tn, self.pos[1] + te
-                if job['hold_alt'] is None:
-                    job['hold_alt'] = down
-                new_d = self.pos[2] + (down - job['hold_alt'])      # the EKF z at which the tag range equals the hold height
+                rt = self._route_target()
+                if rt is not None:                          # the route height, as an EKF z
+                    job['hold_alt'] = rt[0]
+                    new_d = self.arm_z - rt[0]
+                else:
+                    if job['hold_alt'] is None:
+                        job['hold_alt'] = down
+                    new_d = self.pos[2] + (down - job['hold_alt'])      # the EKF z at which the tag range equals the hold height
                 if job['target'] is None:
                     job['target'], job['target_d'] = (new_n, new_e), new_d
                 else:
