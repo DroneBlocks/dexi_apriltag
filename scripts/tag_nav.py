@@ -120,6 +120,15 @@ class TagNav(Node):
         # the current position, which parks the aircraft ~20 cm off.
         p('hold_command', 'hold_ned')
         p('centering_gate', 0.10)         # m, centered when the offset is inside this
+        # Yaw alignment (off by default): turn to square up with the tag while
+        # centering and holding. Without a mag the heading drifts between tags, so
+        # the tag itself is the only heading reference. yaw_offset_deg picks which
+        # tag edge counts as forward: 0 = the tag's top edge.
+        p('align_yaw', False)
+        p('yaw_offset_deg', 0.0)
+        p('yaw_gate_deg', 5.0)            # deg, aligned when the yaw error is inside this
+        p('yaw_kp', 1.0)                  # deg/s of yaw rate per deg of error, during the chase
+        p('yaw_max_rate', 30.0)           # deg/s cap during the chase
         p('centering_settle', 0.7)        # s inside the gate before reporting done
         p('filter_length', 5)
         p('tag_stale_s', 0.5)             # a TF that stops changing for this long is a lost tag
@@ -167,6 +176,11 @@ class TagNav(Node):
         self.hold_accept_s = g('hold_accept_s').value
         self.hold_command = g('hold_command').value
         self.gate = g('centering_gate').value
+        self.align_yaw = g('align_yaw').value
+        self.yaw_offset = math.radians(g('yaw_offset_deg').value)
+        self.yaw_gate = math.radians(g('yaw_gate_deg').value)
+        self.yaw_kp = g('yaw_kp').value
+        self.yaw_max_rate = g('yaw_max_rate').value
         self.settle = g('centering_settle').value
         self.filter_length = int(g('filter_length').value)
         self.tag_stale_s = g('tag_stale_s').value
@@ -348,6 +362,7 @@ class TagNav(Node):
         fwd = cam_fwd * self.cam_yaw_cos - cam_right * self.cam_yaw_sin + self.cam_fwd_off
         right = cam_fwd * self.cam_yaw_sin + cam_right * self.cam_yaw_cos + self.cam_right_off
         down = tr.x * self.tag_scale
+        job['tag_yaw'] = self.tag_yaw_error(t.transform.rotation) if self.align_yaw else None
         # Stale-TF detection by the transform's own stamp: lookup keeps returning
         # the last pose after the tag leaves the frame, so a stamp that stops
         # advancing for tag_stale_s means the tag is gone. (Comparing values would
@@ -364,8 +379,34 @@ class TagNav(Node):
         job['last_raw'] = stamp
         return fwd, right, down
 
+    def tag_yaw_error(self, q):
+        """Body yaw error to the tag's forward edge, radians, positive = turn right.
+
+        The tag's x axis is rotated into base_link with the transform's quaternion,
+        then mapped to body forward/right exactly like the position above."""
+        x, y, z, w = q.x, q.y, q.z, q.w
+        # Tag +y axis in base_link. The tag's top edge lies along +y (checked in the
+        # sim lab, whose tags print top = north: aligned heading 0 deg).
+        vy = 2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)
+        cam_fwd, cam_right = -vy[1], -vy[2]                # base_link -y = forward, -z = right
+        fwd = cam_fwd * self.cam_yaw_cos - cam_right * self.cam_yaw_sin
+        right = cam_fwd * self.cam_yaw_sin + cam_right * self.cam_yaw_cos
+        err = math.atan2(right, fwd) + self.yaw_offset
+        return math.atan2(math.sin(err), math.cos(err))
+
+    def yaw_rate_cmd(self, job):
+        """Chase-phase yaw rate toward the tag edge, deg/s (0 when alignment is off)."""
+        err = job.get('tag_yaw')
+        if err is None:
+            return 0.0
+        rate = self.yaw_kp * math.degrees(err)
+        return max(-self.yaw_max_rate, min(self.yaw_max_rate, rate))
+
+    def yaw_aligned(self, job):
+        return not self.align_yaw or (job.get('tag_yaw') is not None and abs(job['tag_yaw']) < self.yaw_gate)
+
     # ----- Commands to the manager -----
-    def send_velocity(self, vx, vy, vz, force=False):
+    def send_velocity(self, vx, vy, vz, force=False, yaw_rate=0.0):
         now = time.time()
         if not force and now - self.last_cmd_time < self.command_period:
             return
@@ -375,7 +416,7 @@ class TagNav(Node):
             return
         m = OffboardNavCommand()
         m.command = 'set_velocity_body'
-        m.north, m.east, m.down, m.yaw = float(vx), float(vy), float(vz), 0.0
+        m.north, m.east, m.down, m.yaw = float(vx), float(vy), float(vz), float(yaw_rate)
         self.cmd_pub.publish(m)
 
     def send_goto(self, n, e, d, yaw_deg, force=False):
@@ -511,7 +552,7 @@ class TagNav(Node):
             'last_ned_hist': deque(maxlen=3), 'last_ned': None, 'hold_alt': None,
             'offset': None, 'hits': 0, 'log_t': 0.0,
             'mode': 'chase', 'hold_t0': None, 'target': None, 'target_d': None, 'yaw0': None,
-            'hold_s': hold_s,
+            'hold_s': hold_s, 'tag_yaw': None,
         }
         if cmd == 'fly_until_tag':
             self.get_logger().info(f'fly_until_tag {tag_id if tag_id >= 0 else "any"}: body vel ({req.forward:+.2f}, {req.right:+.2f}, {req.down:+.2f}) m/s, timeout {timeout:.0f} s, ignoring {sorted(ids_at_start)} at start')
@@ -696,14 +737,15 @@ class TagNav(Node):
                 return self._finish(job, True, f'held over tag {job["tag_id"]} for {job["hold_s"]:.1f} s: {raw_mag * 100:.0f} cm',
                                     keep_hold=(job['mode'] == 'hold'))
         # Settle / accept (center_on_tag)
-        elif raw_mag < self.gate:
+        elif raw_mag < self.gate and self.yaw_aligned(job):
             if job['settled_since'] is None:
                 job['settled_since'] = now
             if now - job['settled_since'] >= self.settle:
                 return self._finish(job, True, f'centered on tag {job["tag_id"]}: {raw_mag * 100:.0f} cm', keep_hold=(job['mode'] == 'hold'))
         else:
             job['settled_since'] = None
-        if job['command'] == 'center_on_tag' and job['mode'] == 'hold' and now - job['hold_t0'] >= self.hold_accept_s and raw_mag < self.hold_enter:
+        if job['command'] == 'center_on_tag' and job['mode'] == 'hold' and now - job['hold_t0'] >= self.hold_accept_s and raw_mag < self.hold_enter \
+                and self.yaw_aligned(job):
             return self._finish(job, True, f'holding on tag {job["tag_id"]}: {raw_mag * 100:.0f} cm', keep_hold=True)
 
         if job['mode'] == 'hold':
@@ -732,13 +774,18 @@ class TagNav(Node):
                         job['target'] = (job['target'][0] + dn, job['target'][1] + de)
                     a = self.hold_alpha
                     job['target_d'] = a * job['target_d'] + (1 - a) * new_d
+                if job['tag_yaw'] is not None:
+                    # Hold heading = where the tag edge points now. Recomputed from each
+                    # detection, so it converges as the aircraft turns onto it.
+                    job['yaw0'] = math.degrees(self.heading + job['tag_yaw'])
             self.send_goto(job['target'][0], job['target'][1], job['target_d'], job['yaw0'])
             if now - job['log_t'] > 0.5:
                 job['log_t'] = now
                 self.get_logger().info(
                     f'holding on tag {job["tag_id"]}: fwd {fwd:+.2f} right {right:+.2f} down {down:.2f} m '
                     f'-> target N {job["target"][0]:+.2f} E {job["target"][1]:+.2f} D {job["target_d"]:+.2f} '
-                    f'pos N {self.pos[0]:+.2f} E {self.pos[1]:+.2f} v {self.vel_xy:.2f} hold {job["hold_alt"]:.2f}')
+                    f'pos N {self.pos[0]:+.2f} E {self.pos[1]:+.2f} v {self.vel_xy:.2f} hold {job["hold_alt"]:.2f}'
+                    + (f' yaw err {math.degrees(job["tag_yaw"]):+.1f} deg' if job['tag_yaw'] is not None else ''))
             return
 
         # Chase on the filtered offset: proportional inside the taper, flat outside.
@@ -752,12 +799,13 @@ class TagNav(Node):
             vx, vy = ex / mag * speed, ey / mag * speed
         else:
             vx = vy = 0.0
-        self.send_velocity(vx, vy, self.alt_hold_vz(job, down))
+        self.send_velocity(vx, vy, self.alt_hold_vz(job, down), yaw_rate=self.yaw_rate_cmd(job))
         if now - job['log_t'] > 0.5:
             job['log_t'] = now
             self.get_logger().info(
                 f'centering on tag {job["tag_id"]}: fwd {fwd:+.2f} right {right:+.2f} down {down:.2f} m '
-                f'-> vx {vx:+.2f} vy {vy:+.2f} vz {self.last_cmd[2]:+.2f} hold {job["hold_alt"] if job["hold_alt"] is not None else float("nan"):.2f} ekf {self.altitude():.2f}')
+                f'-> vx {vx:+.2f} vy {vy:+.2f} vz {self.last_cmd[2]:+.2f} hold {job["hold_alt"] if job["hold_alt"] is not None else float("nan"):.2f} ekf {self.altitude():.2f}'
+                + (f' yaw err {math.degrees(job["tag_yaw"]):+.1f} deg' if job['tag_yaw'] is not None else ''))
 
     def _publish_status(self):
         job = self.job

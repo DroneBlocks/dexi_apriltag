@@ -325,6 +325,16 @@ the tag centered in the image: the raw offset should read near zero). The
 offset math and chase law come from `apriltag-corridor-mission-code`, flown on
 the DEXI 5 and DEXI 10.
 
+**Yaw alignment** (`align_yaw`, off by default): while centering and holding,
+the aircraft turns until its nose points at the tag's top edge, and "centered"
+also waits for the heading to be inside `yaw_gate_deg` (5 deg). Without a mag,
+heading drifts between tags; the tag is the heading reference. `yaw_offset_deg`
+picks another edge as forward, clockwise from above: 90 = right edge, 180 =
+bottom, -90 = left. The chase turns at up to `yaw_max_rate` (30 deg/s, gain
+`yaw_kp`); the hold commands the heading directly. Turn it on only where the
+tags are laid with a known orientation, e.g. the AVR 2026 court, whose tags point
+their top edge down each row toward the bullseye.
+
 Needs `hold_ned` in `dexi_offboard` (the `goto_ned` arrival logic parks the
 aircraft up to 0.25 m off). The CM4 bringup feeds the detector a 10 Hz image
 stream for this; the 2 Hz YOLO stream is too slow to servo on.
