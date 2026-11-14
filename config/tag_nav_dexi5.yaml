@@ -25,6 +25,10 @@ tag_nav:
     hold_nudge_max: 0.012
     hold_settled_m: 0.35
     hold_settled_v: 0.12
+    hold_refine: rate          # time-based hold refinement (dexi-gym, 2026-11-14); 'nudge' = the old per-detection step
+    hold_rate_k: 0.3
+    hold_rate_max: 0.05
+    hold_rate_deadband: 0.01
     hold_accept_s: 8.0
     hold_command: hold_ned
     centering_gate: 0.10
