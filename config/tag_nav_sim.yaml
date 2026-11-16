@@ -29,6 +29,7 @@ tag_nav:
     hold_altitude: true
     alt_kz: 1.0
     alt_max_rate: 0.3
+    hold_route_altitude: true    # one height for the whole engaged route, captured on its first command
     # SITL has GPS, so the rangefinder gate is replaced by EKF height while armed.
     require_airborne: true
     min_airborne_alt: 0.30
