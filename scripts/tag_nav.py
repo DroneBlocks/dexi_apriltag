@@ -114,6 +114,17 @@ class TagNav(Node):
         # tag at 0.15-0.2 m/s (phase lag): integrate only when quasi-still.
         p('hold_settled_m', 0.35)
         p('hold_settled_v', 0.12)
+        # Which hold refinement: 'nudge' (above, one step per detection) or 'rate'.
+        # 'rate' moves the hold point at hold_rate_k x (camera offset) m/s, capped at
+        # hold_rate_max m/s, every control tick, so its speed does not depend on the
+        # detector rate. (The per-detection cap above was sized for ~8 Hz; at 15 Hz
+        # it lets the point run at 0.18 m/s and the aircraft orbits the tag.) Below
+        # hold_rate_deadband it does not move. In dexi-gym, with PX4 parking 12 cm off
+        # its setpoint, this took the 10 s hold swing from 38 to 20 cm.
+        p('hold_refine', 'nudge')
+        p('hold_rate_k', 0.3)             # 1/s
+        p('hold_rate_max', 0.05)          # m/s
+        p('hold_rate_deadband', 0.01)     # m
         p('hold_accept_s', 8.0)           # s in hold, inside hold_enter, to accept without reaching the gate
         # Manager command used for the hold point. 'hold_ned' is a pure position
         # setpoint; 'goto_ned' declares arrival at 0.25 m and re-latches the hold at
@@ -174,6 +185,12 @@ class TagNav(Node):
         self.hold_nudge_max = g('hold_nudge_max').value
         self.hold_settled_m = g('hold_settled_m').value
         self.hold_settled_v = g('hold_settled_v').value
+        self.hold_refine = g('hold_refine').value
+        self.hold_rate_k = g('hold_rate_k').value
+        self.hold_rate_max = g('hold_rate_max').value
+        self.hold_rate_deadband = g('hold_rate_deadband').value
+        if self.hold_refine not in ('nudge', 'rate'):
+            raise ValueError(f"hold_refine must be 'nudge' or 'rate', got {self.hold_refine!r}")
         self.hold_accept_s = g('hold_accept_s').value
         self.hold_command = g('hold_command').value
         self.gate = g('centering_gate').value
@@ -567,7 +584,7 @@ class TagNav(Node):
             'last_ned_hist': deque(maxlen=3), 'last_ned': None, 'hold_alt': None,
             'offset': None, 'hits': 0, 'log_t': 0.0,
             'mode': 'chase', 'hold_t0': None, 'target': None, 'target_d': None, 'yaw0': None,
-            'hold_s': hold_s, 'tag_yaw': None,
+            'hold_s': hold_s, 'rate_t': None, 'tag_yaw': None,
         }
         if cmd == 'fly_until_tag':
             self.get_logger().info(f'fly_until_tag {tag_id if tag_id >= 0 else "any"}: body vel ({req.forward:+.2f}, {req.right:+.2f}, {req.down:+.2f}) m/s, timeout {timeout:.0f} s, ignoring {sorted(ids_at_start)} at start')
@@ -810,7 +827,7 @@ class TagNav(Node):
                     # setpoint without running away while it is still in transit.
                     at_target = math.hypot(self.pos[0] - job['target'][0], self.pos[1] - job['target'][1]) < self.hold_settled_m
                     settled = at_target and self.vel_xy < self.hold_settled_v
-                    if settled and self.hold_nudge > 0:
+                    if self.hold_refine == 'nudge' and settled and self.hold_nudge > 0:
                         k = self.hold_nudge
                         dn, de = k * tn, k * te
                         step = math.hypot(dn, de)
@@ -823,6 +840,17 @@ class TagNav(Node):
                     # Hold heading = where the tag edge points now. Recomputed from each
                     # detection, so it converges as the aircraft turns onto it.
                     job['yaw0'] = math.degrees(self.heading + job['tag_yaw'])
+            if self.hold_refine == 'rate':
+                # Time-based refinement: every tick with a fresh tag offset, slide the hold
+                # point toward the tag at k x offset m/s (capped). dt is capped so a gap in
+                # detections does not turn into a jump.
+                dt = 0.0 if job['rate_t'] is None else min(0.1, now - job['rate_t'])
+                job['rate_t'] = now
+                tn, te = self.body_to_ned(fwd, right)
+                mag = math.hypot(tn, te)
+                if dt > 0 and mag > self.hold_rate_deadband:
+                    step = min(self.hold_rate_k * mag, self.hold_rate_max) * dt
+                    job['target'] = (job['target'][0] + tn / mag * step, job['target'][1] + te / mag * step)
             self.send_goto(job['target'][0], job['target'][1], job['target_d'], job['yaw0'])
             if now - job['log_t'] > 0.5:
                 job['log_t'] = now
