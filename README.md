@@ -290,6 +290,7 @@ in a later release.
 | `wait_for_tag` | tag id, `-1` = any | returns when the tag is seen twice in a row |
 | `center_on_tag` | `-1` = whichever tag is in view | tapered velocity chase to 0.25 m, then PX4 position hold at the tag's measured position refined from every detection; done inside 10 cm for 0.7 s (or after 8 s in hold inside 0.25 m, reporting the error) |
 | `hold_on_tag` | `-1` = whichever tag is in view | stays centered for `hold_s` seconds, correcting from the tag the whole time |
+| `land_on_tag` | the pad tag (outer ID of a nested pad) | descends at 0.35 m/s while steering at the pad (inner tag `tag_id + pad_inner_offset` first), hands off to PX4 Land below 0.12 m or when the tag is lost below 0.6 m; a tag lost higher up pauses the descent |
 | `fly_until_tag` | `-1` = the first tag not in view at the start | flies the body velocity given in `forward`/`right`/`down` (m/s) until the tag is seen twice in a row, then holds position; `timeout` required |
 
 ### Python examples

@@ -61,6 +61,7 @@ the aircraft again, so the pilot can re-enter Offboard later without a reset.
 | `center_on_tag` | **-1 = any tag in view** | | inside 10 cm for 0.7 s, or after `hold_accept_s` (8 s) in hold inside 0.25 m, typically 5–10 cm; fails after 8 s without the tag |
 | `hold_on_tag` | **-1 = any tag in view** | `hold_s`: seconds to stay | stayed centered for `hold_s`, correcting from the tag; fails if the tag is lost longer than `centering_loss_timeout` |
 | `fly_until_tag` | **-1 = the first tag that was not in view at the start** | `forward` `right` `down`: body velocity m/s, e.g. forward 0.25 | the tag is seen on 2 consecutive detections after `transit_min_s`; the aircraft is left in a position hold |
+| `land_on_tag` | the pad tag (outer ID) | | handed off to PX4 Land (below `land_handoff_h` 0.12 m, or tag lost below `land_lost_h` 0.6 m); PX4 Land then finishes the touchdown, so the aircraft leaves OFFBOARD. Fails if the pad is lost above 0.6 m longer than `centering_loss_timeout` |
 | `wait_for_tag` | the tag | | the tag is in view |
 | `wait_for_offboard` | ignored | | armed, airborne, in OFFBOARD and engaged (`/dexi/tag_nav/engage`, RC aux, or Offboard entry when `engage_on_offboard`) |
 

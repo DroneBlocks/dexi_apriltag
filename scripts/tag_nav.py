@@ -164,6 +164,18 @@ class TagNav(Node):
         p('engage_on_offboard', False)
         p('transit_min_s', 0.5)           # fly_until_tag: ignore sightings before this, so the tag being left cannot retrigger
         p('transit_confirm', 2)           # consecutive ticks the next tag must be seen
+        # land_on_tag: descend onto the pad while still steering at the tag, then hand the
+        # last few cm to PX4 Land. Inner tag of a nested pad (tagCustom48h12: outer ID n,
+        # inner ID n + pad_inner_offset, same center) is preferred when both are seen, so the
+        # pad stays in view down to ~0.15 m. dexi-gym #44/#45: 1.8-2.5 cm median touchdown
+        # against 6-9 cm for PX4 Land from the hold. Only the land_on_tag command uses these.
+        p('land_descent_speed', 0.35)     # m/s down while the tag is in view
+        p('land_xy_k', 1.0)               # 1/s, body velocity per m of tag offset
+        p('land_xy_max', 0.25)            # m/s cap on that correction
+        p('land_handoff_h', 0.12)         # m (tag range, else rangefinder): hand off to PX4 Land below this
+        p('land_lost_h', 0.6)             # m: tag lost below this hands off; above it the descent pauses
+        p('pad_family', '')               # TF family of the pad tags ('' = tag_family), e.g. tagCustom48h12
+        p('pad_inner_offset', 10)         # inner tag ID = pad ID + this; 0 = single tag, no inner
         p('loop_hz', 20.0)
         p('local_position_topic', '')  # '' = /fmu/out/vehicle_local_position (100 Hz); the launch file uses the manager's 20 Hz copy
         p('command_hz', 10.0)
@@ -175,6 +187,13 @@ class TagNav(Node):
         self.cam_yaw_cos, self.cam_yaw_sin = math.cos(yaw), math.sin(yaw)
         self.tag_scale = g('tag_scale').value
         self.tag_family = g('tag_family').value
+        self.land_v = g('land_descent_speed').value
+        self.land_k = g('land_xy_k').value
+        self.land_vmax = g('land_xy_max').value
+        self.land_handoff_h = g('land_handoff_h').value
+        self.land_lost_h = g('land_lost_h').value
+        self.pad_family = g('pad_family').value or self.tag_family
+        self.pad_inner_offset = int(g('pad_inner_offset').value)
         self.centering_speed = g('centering_speed').value
         self.taper = g('centering_taper_dist').value
         self.min_speed = g('centering_min_speed').value
@@ -374,9 +393,12 @@ class TagNav(Node):
         return dn * c + de * s, -dn * s + de * c
 
     # ----- Tag offset -----
-    def tag_offset(self, tag_id, job):
-        """Body-frame offset to the tag: (forward, right, down) in meters, or None."""
-        frame = f'{self.tag_family}:{tag_id}'
+    def tag_offset(self, tag_id, job, family=None):
+        """Body-frame offset to the tag: (forward, right, down) in meters, or None.
+
+        job carries the stale-TF state (last_raw, last_change, new_sample, tag_yaw); pass a
+        separate dict per tag when tracking more than one."""
+        frame = f'{family or self.tag_family}:{tag_id}'
         try:
             t = self.tf_buffer.lookup_transform('base_link', frame, rclpy.time.Time(),
                                                 timeout=rclpy.duration.Duration(seconds=0.02))
@@ -521,7 +543,7 @@ class TagNav(Node):
         cmd = req.command.strip()
         tag_id = req.tag_id
         timeout = req.timeout if req.timeout > 0 else 30.0
-        if cmd not in ('center_on_tag', 'hold_on_tag', 'wait_for_tag', 'wait_for_offboard', 'fly_until_tag'):
+        if cmd not in ('center_on_tag', 'hold_on_tag', 'wait_for_tag', 'wait_for_offboard', 'fly_until_tag', 'land_on_tag'):
             res.success, res.message = False, f'unknown command {cmd}'
             return res
         if cmd == 'wait_for_offboard':
@@ -585,6 +607,8 @@ class TagNav(Node):
             'offset': None, 'hits': 0, 'log_t': 0.0,
             'mode': 'chase', 'hold_t0': None, 'target': None, 'target_d': None, 'yaw0': None,
             'hold_s': hold_s, 'rate_t': None, 'tag_yaw': None,
+            'inner': {'last_raw': None, 'last_change': t0, 'new_sample': False, 'tag_yaw': None},
+            'used': None,
         }
         if cmd == 'fly_until_tag':
             self.get_logger().info(f'fly_until_tag {tag_id if tag_id >= 0 else "any"}: body vel ({req.forward:+.2f}, {req.right:+.2f}, {req.down:+.2f}) m/s, timeout {timeout:.0f} s, ignoring {sorted(ids_at_start)} at start')
@@ -711,6 +735,9 @@ class TagNav(Node):
                 job['log_t'] = now
                 self.get_logger().info(f'transit {elapsed:.1f} s: vel ({vx:+.2f}, {vy:+.2f}) alt {self.altitude():.2f}, tags in view {ids}')
             return
+
+        if job['command'] == 'land_on_tag':
+            return self._land_tick(job, now)
 
         off = self.tag_offset(job['tag_id'], job)
         job['offset'] = off
@@ -879,6 +906,58 @@ class TagNav(Node):
                 f'centering on tag {job["tag_id"]}: fwd {fwd:+.2f} right {right:+.2f} down {down:.2f} m '
                 f'-> vx {vx:+.2f} vy {vy:+.2f} vz {self.last_cmd[2]:+.2f} hold {job["hold_alt"] if job["hold_alt"] is not None else float("nan"):.2f} ekf {self.altitude():.2f}'
                 + (f' yaw err {math.degrees(job["tag_yaw"]):+.1f} deg' if job['tag_yaw'] is not None else ''))
+
+    def _land_tick(self, job, now):
+        """land_on_tag: descend at land_descent_speed while steering at the pad (body velocity,
+        P on the camera offset, capped), inner tag first. Below land_handoff_h, or with the
+        tag lost below land_lost_h, hand off to PX4 Land and finish. A tag lost higher up
+        pauses the descent; centering_loss_timeout of that fails the command."""
+        off, used = None, None
+        if self.pad_inner_offset:
+            inner_id = job['tag_id'] + self.pad_inner_offset
+            off = self.tag_offset(inner_id, job['inner'], family=self.pad_family)
+            used = inner_id if off is not None else None
+        if off is None:
+            off = self.tag_offset(job['tag_id'], job, family=self.pad_family)
+            used = job['tag_id'] if off is not None else None
+        job['offset'] = off
+        if used is not None and used != job['used']:
+            self.get_logger().info(f'land_on_tag: steering on tag {used} at {off[2]:.2f} m')
+        job['used'] = used
+        h = off[2] if off is not None else self.altitude()
+        if h < self.land_handoff_h or (off is None and h < self.land_lost_h):
+            self._send_land()
+            why = f'tag {used}' if off is not None else 'tag lost'
+            return self._finish(job, True, f'handed to PX4 Land at {h:.2f} m ({why})', keep_hold=True)
+        if off is None:
+            if job['loss_start'] is None:
+                job['loss_start'] = now
+            lost_for = now - job['loss_start']
+            if lost_for > self.loss_timeout:
+                return self._finish(job, False, f'lost pad tag {job["tag_id"]} for {lost_for:.1f} s at {h:.2f} m')
+            self.send_velocity(0.0, 0.0, 0.0)
+            if now - job['log_t'] > 1.0:
+                job['log_t'] = now
+                self.get_logger().warn(f'land_on_tag: pad lost {lost_for:.1f} s at {h:.2f} m, descent paused')
+            return
+        job['loss_start'] = None
+        fwd, right, down = off
+        vx, vy = self.land_k * fwd, self.land_k * right
+        sp = math.hypot(vx, vy)
+        if sp > self.land_vmax:
+            vx, vy = vx * self.land_vmax / sp, vy * self.land_vmax / sp
+        self.send_velocity(vx, vy, self.land_v)
+        if now - job['log_t'] > 0.5:
+            job['log_t'] = now
+            self.get_logger().info(f'land_on_tag: tag {used} fwd {fwd:+.3f} right {right:+.3f} down {down:.2f} m -> vx {vx:+.2f} vy {vy:+.2f} vz {self.land_v:.2f}')
+
+    def _send_land(self):
+        self.last_cmd = (0.0, 0.0, 0.0)
+        if self.dry_run:
+            return
+        m = OffboardNavCommand()
+        m.command = 'land'
+        self.cmd_pub.publish(m)
 
     def _publish_status(self):
         job = self.job
