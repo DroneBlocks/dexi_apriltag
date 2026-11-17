@@ -57,5 +57,14 @@ tag_nav:
     engage_on_offboard: true
     transit_min_s: 0.5
     transit_confirm: 2
+    # land_on_tag (nested pad: tagCustom48h12, outer ID n, inner n + 10; needs a second
+    # apriltag_ros node for that family). Only land_on_tag reads these.
+    land_descent_speed: 0.35
+    land_xy_k: 1.0
+    land_xy_max: 0.25
+    land_handoff_h: 0.12
+    land_lost_h: 0.6
+    pad_family: tagCustom48h12
+    pad_inner_offset: 10
     loop_hz: 20.0
     command_hz: 10.0
