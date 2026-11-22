@@ -9,6 +9,13 @@ Supports two modes:
   - Single tag mode (legacy): Tracks one tag, uses origin offset alignment
   - Tag map mode: Multiple tags at known world positions, provides absolute position
 
+Heading fusion (fuse_heading:=true): each message also carries the body heading measured from the tag
+(q), and positions are published in the tag map's own frame (no origin offset). PX4 then takes the tag
+map as its position AND heading reference. Required on a DEXI with no magnetometer: without a heading
+source PX4 never sets yaw_align and silently drops NED vision positions (PX4 v1.16 ev_pos_control.cpp).
+Set EKF2_EV_CTRL 9 (horizontal position + yaw) or 11 (+ vertical position). Off by default: with
+fuse_heading false the node behaves exactly as before.
+
 Usage:
     ros2 run dexi_apriltag apriltag_odometry.py
 """
@@ -16,12 +23,68 @@ Usage:
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rcl_interfaces.msg import ParameterDescriptor
 import tf2_ros
 from px4_msgs.msg import VehicleOdometry, VehicleLocalPosition, VehicleAttitude
 from apriltag_msgs.msg import AprilTagDetectionArray
 import time
 import math
 from collections import deque
+
+
+def wrap_angle(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+# base_link as the TF tree gives it (measured in the dexi-sim-ftw browser sim, 2026-11-22, by moving the
+# drone 0.5 m with GPS as truth): x = body down, y = body back, z = body left. A base_link vector v is
+# (forward, right) = (-v_y, -v_z) in the body frame, and the TF translation is the TAG relative to the drone.
+
+
+def tag_angle_in_body(qw, qx, qy, qz):
+    """Angle of the tag's x axis (right on the printed tag) in the drone's horizontal plane, rad
+    (0 = body forward, + toward right). Column 0 of the base_link -> tag rotation, mapped to body axes."""
+    vy = 2.0 * (qx * qy + qw * qz)
+    vz = 2.0 * (qx * qz - qw * qy)
+    return math.atan2(-vz, -vy)
+
+
+def drone_in_map(tx, ty, tz, heading, tag_north, tag_east, camera_forward=0.0):
+    """Drone (north, east) in the map frame from the tag's TF translation in base_link and the heading:
+    drone = tag - (tag relative to drone, rotated from body to map). camera_forward: how far the camera
+    sits ahead of the drone's center, m (DEXI-5: 0.105, as in tag_nav_dexi5.yaml)."""
+    fwd, right = -ty + camera_forward, -tz
+    c, s = math.cos(heading), math.sin(heading)
+    return tag_north - (fwd * c - right * s), tag_east - (fwd * s + right * c)
+
+
+def heading_from_tag(qw, qx, qy, qz, tag_map_yaw, yaw_offset):
+    """Drone heading in the tag map frame, rad. A tag that appears turned left in the image means the
+    drone is turned right of it. yaw_offset fixes which way a tag laid "facing north" points in its own
+    frame (calibrate once: drone sitting on a tag, nose along the tag's north, read 'body vs tag')."""
+    return wrap_angle(tag_map_yaw + yaw_offset - tag_angle_in_body(qw, qx, qy, qz))
+
+
+def gate_miss(px4_heading, tag_heading, fix_n, fix_e, px4_n, px4_e, gate_m):
+    """Distance from PX4's estimate if the fix should be skipped, else None. Only gates once PX4's heading
+    agrees with the tags (within 5 deg), i.e. once PX4 has adopted the tag map's frame."""
+    if gate_m <= 0 or abs(wrap_angle(px4_heading - tag_heading)) >= math.radians(5.0):
+        return None
+    miss = math.hypot(fix_n - px4_n, fix_e - px4_e)
+    return miss if miss > gate_m else None
+
+
+def quat_from_euler(roll, pitch, yaw):
+    """[w, x, y, z] for a ZYX (yaw, pitch, roll) rotation, the convention of PX4's attitude."""
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    return [cr * cp * cy + sr * sp * sy, sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy, cr * cp * sy - sr * sp * cy]
+
+
+def circular_mean(angles):
+    return math.atan2(sum(math.sin(a) for a in angles), sum(math.cos(a) for a in angles))
 
 
 class AprilTagOdometry(Node):
@@ -36,11 +99,24 @@ class AprilTagOdometry(Node):
         self.declare_parameter('orientation_variance', [0.01, 0.01, 0.01])
         self.declare_parameter('filter_length', 5)
         self.declare_parameter('dry_run', False)
+        # Heading fusion (see the module docstring). Scalars so launch files can set them.
+        self.declare_parameter('fuse_heading', False)
+        anynum = ParameterDescriptor(dynamic_typing=True)       # accept 90 as well as 90.0 from the command line
+        self.declare_parameter('position_variance_xy', -1.0, anynum)   # m^2; > 0 overrides position_variance x, y
+        self.declare_parameter('yaw_variance', 0.0012, anynum)          # rad^2 (2 deg sd)
+        # A tag laid with its printed top edge toward map north has its x axis (printed right) pointing
+        # east: +90 deg. Check once in dry run (drone on a tag, nose north: 'Tag hdg' should read ~0).
+        self.declare_parameter('tag_yaw_offset_deg', 90.0, anynum)
+        self.declare_parameter('camera_forward_offset', 0.0, anynum)   # m, camera ahead of center (DEXI-5 0.105)
+        # Heading-fusion outlier gate: once PX4 flies in the tag map's frame, skip a fix that lands more than
+        # gate_m from PX4's estimate (a duplicate tag ID, e.g. the AVR hangar roofs reuse IDs 1 and 3). 0 = off.
+        self.declare_parameter('gate_m', 1.0, anynum)
 
         # Tag map parameters
         self.declare_parameter('tag_map_ids', rclpy.Parameter.Type.INTEGER_ARRAY)
         self.declare_parameter('tag_map_x', rclpy.Parameter.Type.DOUBLE_ARRAY)
         self.declare_parameter('tag_map_y', rclpy.Parameter.Type.DOUBLE_ARRAY)
+        self.declare_parameter('tag_map_yaw_deg', rclpy.Parameter.Type.DOUBLE_ARRAY)   # optional; default 0 = facing north
 
         self.tag_family = self.get_parameter('tag_family').value
         self.target_tag_id = self.get_parameter('target_tag_id').value
@@ -49,6 +125,15 @@ class AprilTagOdometry(Node):
         self.orientation_variance = self.get_parameter('orientation_variance').value
         self.filter_length = self.get_parameter('filter_length').value
         self.dry_run = self.get_parameter('dry_run').value
+        self.fuse_heading = bool(self.get_parameter('fuse_heading').value)
+        self.yaw_variance = float(self.get_parameter('yaw_variance').value)
+        self.tag_yaw_offset = math.radians(float(self.get_parameter('tag_yaw_offset_deg').value))
+        self.camera_forward = float(self.get_parameter('camera_forward_offset').value)
+        self.gate_m = float(self.get_parameter('gate_m').value)
+        self.gated = 0
+        pv_xy = float(self.get_parameter('position_variance_xy').value)
+        if pv_xy > 0:
+            self.position_variance = [pv_xy, pv_xy, self.position_variance[2]]
 
         # Build tag map
         self.tag_map = {}
@@ -66,6 +151,15 @@ class AprilTagOdometry(Node):
                     self.use_tag_map = True
                 else:
                     self.get_logger().error('Tag map arrays must be the same length')
+        except rclpy.exceptions.ParameterUninitializedException:
+            pass
+        self.tag_map_yaw = {}
+        try:
+            yaws = self.get_parameter('tag_map_yaw_deg').value
+            if yaws and self.use_tag_map and len(yaws) == len(self.tag_map):
+                self.tag_map_yaw = {tid: math.radians(float(y)) for tid, y in zip(self.tag_map.keys(), yaws)}
+            elif yaws:
+                self.get_logger().error('tag_map_yaw_deg must match tag_map_ids in length; using 0 for all')
         except rclpy.exceptions.ParameterUninitializedException:
             pass
 
@@ -131,6 +225,7 @@ class AprilTagOdometry(Node):
         self.north_buffer = deque(maxlen=self.filter_length)
         self.east_buffer = deque(maxlen=self.filter_length)
         self.down_buffer = deque(maxlen=self.filter_length)
+        self.yaw_buffer = deque(maxlen=self.filter_length)
 
         # Publish timer
         period = 1.0 / self.publish_rate
@@ -144,6 +239,10 @@ class AprilTagOdometry(Node):
         else:
             self.get_logger().info(f'Single tag mode: {self.tag_family}:{self.target_tag_id}')
         self.get_logger().info(f'Filter: {self.filter_length}-sample moving average')
+        if self.fuse_heading:
+            self.get_logger().info(
+                f'Heading fusion ON: map-frame position + tag heading, xy variance {self.position_variance[0]} m^2, '
+                f'yaw variance {self.yaw_variance} rad^2. Needs EKF2_EV_CTRL 9 or 11 (yaw bit).')
         if self.dry_run:
             self.get_logger().warn(f'DRY RUN MODE - logging only, NOT publishing to EKF2')
         else:
@@ -313,6 +412,7 @@ class AprilTagOdometry(Node):
                 self.north_buffer.clear()
                 self.east_buffer.clear()
                 self.down_buffer.clear()
+                self.yaw_buffer.clear()
             self.last_visible_tag_id = tag_id
             self.consecutive_readings = 0
 
@@ -339,7 +439,29 @@ class AprilTagOdometry(Node):
         tag_rel_north = body_forward * cos_h - body_right * sin_h
         tag_rel_east = body_forward * sin_h + body_right * cos_h
 
-        if self.use_tag_map:
+        heading_map = None
+        if self.fuse_heading:
+            heading_map = heading_from_tag(qw, qx, qy, qz, self.tag_map_yaw.get(tag_id, 0.0), self.tag_yaw_offset)
+            tag_world_north, tag_world_east = self.tag_map.get(tag_id, (0.0, 0.0)) if self.use_tag_map else (0.0, 0.0)
+            # rotated with the tag's heading, not PX4's (PX4 adopts this frame)
+            map_north, map_east = drone_in_map(tx, ty, tz, heading_map, tag_world_north, tag_world_east,
+                                               self.camera_forward)
+            if not self.origin_locked:                   # z only: keep PX4's height reference
+                self.offset_down = self.drone_z - body_down
+                self.origin_locked = True
+                self.get_logger().info(
+                    f'Heading fusion: first fix on tag {tag_id}, heading {math.degrees(heading_map):.1f} deg in the map frame')
+            north_raw, east_raw = map_north, map_east
+            down_raw = body_down + self.offset_down
+            miss = gate_miss(self.drone_heading, heading_map, north_raw, east_raw, self.drone_x, self.drone_y, self.gate_m)
+            if miss is not None:
+                self.gated += 1
+                self.get_logger().warn(
+                    f'Tag {tag_id}: fix {miss:.2f} m from PX4 estimate, skipped (gate {self.gate_m} m, {self.gated} so far)',
+                    throttle_duration_sec=1.0)
+                return
+
+        elif self.use_tag_map:
             tag_world_north, tag_world_east = self.tag_map[tag_id]
             drone_map_north = tag_world_north + tag_rel_north
             drone_map_east = tag_world_east + tag_rel_east
@@ -385,6 +507,9 @@ class AprilTagOdometry(Node):
         north = sum(self.north_buffer) / len(self.north_buffer)
         east = sum(self.east_buffer) / len(self.east_buffer)
         down = sum(self.down_buffer) / len(self.down_buffer)
+        if heading_map is not None:
+            self.yaw_buffer.append(heading_map)
+            heading_map = circular_mean(self.yaw_buffer)
 
         # Build VehicleOdometry message
         msg = VehicleOdometry()
@@ -392,7 +517,10 @@ class AprilTagOdometry(Node):
         msg.timestamp_sample = self._tf_timestamp_us
         msg.pose_frame = VehicleOdometry.POSE_FRAME_NED
         msg.position = [float(north), float(east), float(down)]
-        msg.q = [float('nan'), float('nan'), float('nan'), float('nan')]
+        if heading_map is not None:
+            msg.q = [float(v) for v in quat_from_euler(self.drone_roll, self.drone_pitch, heading_map)]
+        else:
+            msg.q = [float('nan'), float('nan'), float('nan'), float('nan')]
         msg.velocity_frame = VehicleOdometry.VELOCITY_FRAME_UNKNOWN
         msg.velocity = [float('nan'), float('nan'), float('nan')]
         msg.angular_velocity = [float('nan'), float('nan'), float('nan')]
@@ -404,7 +532,7 @@ class AprilTagOdometry(Node):
         msg.orientation_variance = [
             float(self.orientation_variance[0]),
             float(self.orientation_variance[1]),
-            float(self.orientation_variance[2])
+            float(self.yaw_variance if heading_map is not None else self.orientation_variance[2])
         ]
         msg.velocity_variance = [float('nan'), float('nan'), float('nan')]
         msg.quality = 100
@@ -422,7 +550,9 @@ class AprilTagOdometry(Node):
             self.get_logger().info(
                 f'{tag_info} | Body: [{body_forward:.2f}, {body_right:.2f}] | '
                 f'NED: [{north:.2f}, {east:.2f}] | '
-                f'Hdg: {heading_deg:.0f}°')
+                f'Hdg: {heading_deg:.0f}°' +
+                (f' | Tag hdg: {math.degrees(heading_map):.1f}° (body vs tag {math.degrees(tag_angle_in_body(qw, qx, qy, qz)):.1f}°)'
+                 if heading_map is not None else ''))
             self.last_publish_time = now
 
 

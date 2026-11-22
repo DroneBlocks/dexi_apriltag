@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -21,6 +22,27 @@ def generate_launch_description():
         'target_tag_id',
         default_value='0',
         description='Target tag ID'))
+
+    # Heading fusion (off by default: behaves exactly as before). On a DEXI with no magnetometer PX4 drops
+    # vision positions without a heading, so tag-map flight needs fuse_heading:=true and EKF2_EV_CTRL 9.
+    ld.add_action(DeclareLaunchArgument(
+        'fuse_heading', default_value='false',
+        description='Send the tag heading in q and publish map-frame positions (needs EKF2_EV_CTRL 9 or 11)'))
+    ld.add_action(DeclareLaunchArgument(
+        'position_variance_xy', default_value='-1.0',
+        description='Horizontal position variance, m^2 (> 0 overrides the 2.0 default; 0.02 = 14 cm sd)'))
+    ld.add_action(DeclareLaunchArgument(
+        'tag_yaw_offset_deg', default_value='90.0',
+        description='Tag frame vs map +x; 90 for tags laid printed top edge toward +x (check in dry run)'))
+    ld.add_action(DeclareLaunchArgument(
+        'gate_m', default_value='1.0',
+        description='Skip a heading-mode fix this far from PX4 estimate (duplicate tag IDs); 0 = off'))
+    ld.add_action(DeclareLaunchArgument(
+        'camera_forward_offset', default_value='0.0',
+        description='Camera ahead of the drone center, m, heading-fusion mode (DEXI-5: 0.105)'))
+    ld.add_action(DeclareLaunchArgument(
+        'dry_run', default_value='false',
+        description='Log only, do not publish to PX4'))
 
     # Odometry arguments
     ld.add_action(DeclareLaunchArgument(
@@ -98,6 +120,12 @@ def generate_launch_description():
             'position_variance': [2.0, 2.0, 100.0],  # Higher variance = less aggressive corrections
             'orientation_variance': [0.01, 0.01, 0.01],
             'filter_length': 5,  # Moving average filter (ModalAI approach)
+            'fuse_heading': ParameterValue(LaunchConfiguration('fuse_heading'), value_type=bool),
+            'position_variance_xy': ParameterValue(LaunchConfiguration('position_variance_xy'), value_type=float),
+            'tag_yaw_offset_deg': ParameterValue(LaunchConfiguration('tag_yaw_offset_deg'), value_type=float),
+            'dry_run': ParameterValue(LaunchConfiguration('dry_run'), value_type=bool),
+            'camera_forward_offset': ParameterValue(LaunchConfiguration('camera_forward_offset'), value_type=float),
+            'gate_m': ParameterValue(LaunchConfiguration('gate_m'), value_type=float),
         }]
     )
     ld.add_action(apriltag_odometry_node)

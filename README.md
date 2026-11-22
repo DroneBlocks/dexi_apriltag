@@ -78,6 +78,41 @@ Defined in `config/tag_map_sim.yaml`. 2x10 grid of tag36h11 tags:
 - 10 rows from North = 0m to 9m (1m spacing)
 - Tag size: 0.15m in Unity, 0.1524m (6 in) on real hardware
 
+## Tag map as indoor GPS: heading fusion
+
+On a DEXI with no magnetometer (`EKF2_MAG_TYPE 5`), PX4 drops vision positions unless they carry a heading:
+it only fuses a NED vision position after `yaw_align`, and only a magnetometer, GPS or vision yaw sets it
+(PX4 v1.16 `ev_pos_control.cpp`; 545 fleet flights never aligned). With `fuse_heading:=true` the odometry node
+sends the heading measured from the tag in `q` and publishes positions in the tag map's frame, so PX4 uses
+the tags for position and heading.
+
+```bash
+# PX4 (one time)
+EKF2_EV_CTRL   9      # horizontal position + yaw from vision (11 adds vertical)
+# AprilTag detector: decimate 2 for 1.5-2 m flight (decimate 4 tops out near 1.8 m on the Pi Cam)
+
+# 1. Heading check, props off: drone on tag 0, nose pointing along the tag map's +x axis (toward the
+#    tag with the next larger x), NOT toward compass north
+ros2 launch dexi_apriltag apriltag_odometry.launch.py fuse_heading:=true dry_run:=true camera_forward_offset:=0.105
+#    "Tag hdg" should read ~0. If it reads ~90, ~180 or ~-90, add that to tag_yaw_offset_deg (default 90).
+# 2. Position check, props off: carry the drone 1 m along +x, then 1 m along +y. "NED" should change by
+#    about +1 in the first number, then the second. If it moves the wrong way, stop and report it.
+# 3. Fly
+ros2 launch dexi_apriltag apriltag_odometry.launch.py fuse_heading:=true position_variance_xy:=0.02 camera_forward_offset:=0.105
+```
+
+Check it is fused: `listener estimator_status_flags` in the MAVLink console, `cs_ev_pos` and `cs_yaw_align` true.
+Tag map mode reads `tag_map_ids`, `tag_map_x`, `tag_map_y` and optionally `tag_map_yaw_deg` (default 0 = all
+facing north). In sim (dexi-gym) this cut a 60 s hover drift from 11 cm to 4 cm, and a 15 x 30 ft floor with
+tags on a 5 ft grid held about 7.5 cm (dexi-gym `notes/testflight-ev.md`, `eval/report-warehouse.html`).
+Math check without ROS: `python test/test_heading_math.py`.
+
+Sim check (dexi-sim-ftw, AVR field, 2026-11-22): with GPS and magnetometer switched off in flight, PX4 flew
+on the tags alone for position and heading (`cs_ev_pos`, `cs_ev_yaw` true), heading within 0.2 deg, position
+matching GPS to 1-4 cm over a tag, and hopped tag 0 to 4. That sim has no optical flow, so every tag
+handover (about 0.5 s without a fix) is IMU-only; a DEXI's flow carries those gaps. The sim's tags needed
+`tag_yaw_offset_deg 180` (laid differently from "top edge toward +x"): do the heading check on each field.
+
 ## Real Hardware Setup (ARK CM4)
 
 ### Prerequisites
