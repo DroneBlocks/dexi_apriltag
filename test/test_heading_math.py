@@ -9,10 +9,11 @@ import sys
 import types
 from pathlib import Path
 
-for name in ("rclpy", "rclpy.node", "rclpy.qos", "tf2_ros", "px4_msgs", "px4_msgs.msg", "apriltag_msgs", "apriltag_msgs.msg"):
+for name in ("rclpy", "rclpy.node", "rclpy.qos", "rcl_interfaces", "rcl_interfaces.msg", "tf2_ros", "px4_msgs", "px4_msgs.msg", "apriltag_msgs", "apriltag_msgs.msg"):
     m = types.ModuleType(name)
     sys.modules[name] = m
 sys.modules["rclpy.node"].Node = object
+sys.modules["rcl_interfaces.msg"].ParameterDescriptor = object
 for n in ("QoSProfile", "ReliabilityPolicy", "DurabilityPolicy"):
     setattr(sys.modules["rclpy.qos"], n, object)
 for n in ("VehicleOdometry", "VehicleLocalPosition", "VehicleAttitude"):
@@ -40,13 +41,13 @@ def quat_from_matrix(R):
 
 def tag_quat_in_base_link(psi, tag_yaw):
     """Tag lying flat, printed top edge pointing tag_yaw (map frame, 0 = north); drone level, heading psi.
-    AprilTag frame: x = printed right, y = printed down, z = into the tag. base_link axes (from the node's
-    translation code): x = body down, y = body forward, z = body right."""
-    def ned_to_bl(v):                  # NED vector -> body FRD -> base_link (down, fwd, right)
+    AprilTag frame: x = printed right, y = printed down, z = into the tag. base_link axes (measured in the
+    sim): x = body down, y = body back, z = body left."""
+    def ned_to_bl(v):                  # NED vector -> body FRD -> base_link (down, back, left)
         n, e, d = v
         f = n * math.cos(psi) + e * math.sin(psi)
         r = -n * math.sin(psi) + e * math.cos(psi)
-        return (d, f, r)
+        return (d, -f, -r)
     top = (math.cos(tag_yaw), math.sin(tag_yaw), 0.0)
     x = (math.cos(tag_yaw + math.pi / 2), math.sin(tag_yaw + math.pi / 2), 0.0)    # printed right = top turned +90
     y = (-top[0], -top[1], 0.0)                                                      # printed down
@@ -68,6 +69,35 @@ def test_heading():
     return worst
 
 
+def test_position():
+    """Drone at (dn, de) from a tag at (tn, te), heading psi: the TF translation is the tag relative to the
+    drone in base_link (down, back, left); drone_in_map must give the drone back."""
+    rng = random.Random(1)
+    worst = 0.0
+    for _ in range(2000):
+        psi = rng.uniform(-math.pi, math.pi)
+        tn, te, dn, de = (rng.uniform(-5, 5) for _ in range(4))
+        rn, re = tn - dn, te - de                                    # tag relative to drone, NED
+        f = rn * math.cos(psi) + re * math.sin(psi)
+        r = -rn * math.sin(psi) + re * math.cos(psi)
+        tx, ty, tz = 1.5, -f, -r                                     # base_link (down, back, left)
+        n, e = odom.drone_in_map(tx, ty, tz, psi, tn, te)
+        worst = max(worst, math.hypot(n - dn, e - de))
+    assert worst < 1e-9, worst
+    # the sim measurement: heading east, drone 0.5 m east of the tag -> tag 0.5 m behind: ty = +0.5
+    n, e = odom.drone_in_map(1.5, 0.5, 0.0, math.radians(90), 0.0, 0.0)
+    assert abs(n) < 1e-9 and abs(e - 0.5) < 1e-9, (n, e)
+    return worst
+
+
+def test_gate():
+    h = math.radians(90)
+    assert odom.gate_miss(h, h, 2.0, 0.0, 0.0, 0.0, 1.0) == 2.0                        # duplicate ID 2 m off: skip
+    assert odom.gate_miss(h, h, 0.3, 0.0, 0.0, 0.0, 1.0) is None                       # normal fix: keep
+    assert odom.gate_miss(h, h + math.radians(30), 5.0, 0.0, 0.0, 0.0, 1.0) is None    # frames not aligned yet: keep
+    assert odom.gate_miss(h, h, 5.0, 0.0, 0.0, 0.0, 0.0) is None                       # gate off
+
+
 def test_quat():
     for r, p, y in ((0.1, -0.05, 2.0), (0.0, 0.0, -3.0), (-0.2, 0.15, 0.5)):
         w, x, yq, z = odom.quat_from_euler(r, p, y)
@@ -83,6 +113,8 @@ def test_circular_mean():
 
 if __name__ == "__main__":
     print("heading worst error (rad):", test_heading())
+    print("position worst error (m):", test_position())
+    test_gate()
     test_quat()
     test_circular_mean()
     print("all ok")

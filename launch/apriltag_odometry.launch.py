@@ -33,7 +33,13 @@ def generate_launch_description():
         description='Horizontal position variance, m^2 (> 0 overrides the 2.0 default; 0.02 = 14 cm sd)'))
     ld.add_action(DeclareLaunchArgument(
         'tag_yaw_offset_deg', default_value='90.0',
-        description='Tag frame vs map north; 90 for tags laid printed top edge north (check in dry run)'))
+        description='Tag frame vs map +x; 90 for tags laid printed top edge toward +x (check in dry run)'))
+    ld.add_action(DeclareLaunchArgument(
+        'gate_m', default_value='1.0',
+        description='Skip a heading-mode fix this far from PX4 estimate (duplicate tag IDs); 0 = off'))
+    ld.add_action(DeclareLaunchArgument(
+        'camera_forward_offset', default_value='0.0',
+        description='Camera ahead of the drone center, m, heading-fusion mode (DEXI-5: 0.105)'))
     ld.add_action(DeclareLaunchArgument(
         'dry_run', default_value='false',
         description='Log only, do not publish to PX4'))
@@ -118,6 +124,8 @@ def generate_launch_description():
             'position_variance_xy': ParameterValue(LaunchConfiguration('position_variance_xy'), value_type=float),
             'tag_yaw_offset_deg': ParameterValue(LaunchConfiguration('tag_yaw_offset_deg'), value_type=float),
             'dry_run': ParameterValue(LaunchConfiguration('dry_run'), value_type=bool),
+            'camera_forward_offset': ParameterValue(LaunchConfiguration('camera_forward_offset'), value_type=float),
+            'gate_m': ParameterValue(LaunchConfiguration('gate_m'), value_type=float),
         }]
     )
     ld.add_action(apriltag_odometry_node)
