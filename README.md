@@ -78,6 +78,32 @@ Defined in `config/tag_map_sim.yaml`. 2x10 grid of tag36h11 tags:
 - 10 rows from North = 0m to 9m (1m spacing)
 - Tag size: 0.15m in Unity, 0.1524m (6 in) on real hardware
 
+## Tag map as indoor GPS: heading fusion
+
+On a DEXI with no magnetometer (`EKF2_MAG_TYPE 5`), PX4 drops vision positions unless they carry a heading:
+it only fuses a NED vision position after `yaw_align`, and only a magnetometer, GPS or vision yaw sets it
+(PX4 v1.16 `ev_pos_control.cpp`; 545 fleet flights never aligned). With `fuse_heading:=true` the odometry node
+sends the heading measured from the tag in `q` and publishes positions in the tag map's frame, so PX4 uses
+the tags for position and heading.
+
+```bash
+# PX4 (one time)
+EKF2_EV_CTRL   9      # horizontal position + yaw from vision (11 adds vertical)
+# AprilTag detector: decimate 2 for 1.5-2 m flight (decimate 4 tops out near 1.8 m on the Pi Cam)
+
+# 1. Calibration check, props off: drone on a tag, nose toward the tag's printed top edge (map north)
+ros2 launch dexi_apriltag apriltag_odometry.launch.py fuse_heading:=true dry_run:=true
+#    the log should read "Tag hdg: ~0". If it reads ~90, ~180 or ~-90, set tag_yaw_offset_deg to fix it.
+# 2. Fly
+ros2 launch dexi_apriltag apriltag_odometry.launch.py fuse_heading:=true position_variance_xy:=0.02
+```
+
+Check it is fused: `listener estimator_status_flags` in the MAVLink console, `cs_ev_pos` and `cs_yaw_align` true.
+Tag map mode reads `tag_map_ids`, `tag_map_x`, `tag_map_y` and optionally `tag_map_yaw_deg` (default 0 = all
+facing north). In sim (dexi-gym) this cut a 60 s hover drift from 11 cm to 4 cm, and a 15 x 30 ft floor with
+tags on a 5 ft grid held about 7.5 cm (dexi-gym `notes/testflight-ev.md`, `eval/report-warehouse.html`).
+Math check without ROS: `python test/test_heading_math.py`.
+
 ## Real Hardware Setup (ARK CM4)
 
 ### Prerequisites
